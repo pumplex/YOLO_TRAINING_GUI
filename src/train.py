@@ -90,13 +90,21 @@ def clean_up(train_data_path):
     for path in ['train', 'val']:
         shutil.rmtree(os.path.join(train_data_path, path), ignore_errors=True)
 
-def copy_and_remove_latest_run_files(model_save_path, project_name):
+def copy_and_remove_latest_run_files(model_save_path, project_name, task='detect'):
+    """Copy training artefacts from the runs directory to model_save_path."""
     model_save_path = Path(model_save_path)
-    runs_path = Path('runs/detect') / project_name
-    list_of_dirs = list(Path('runs/detect').glob(project_name))
-    
+
+    # Search the expected task directory first, then fall back to other tasks
+    list_of_dirs: list[Path] = []
+    for candidate_task in (task, 'detect', 'segment', 'train'):
+        candidate_base = Path('runs') / candidate_task
+        if candidate_base.exists():
+            list_of_dirs = list(candidate_base.glob(project_name))
+            if list_of_dirs:
+                break
+
     if not list_of_dirs:
-        print(f"No 'runs/detect/{project_name}' directories found. Skipping copy and removal.")
+        print(f"No 'runs/{task}/{project_name}' directories found. Skipping copy and removal.")
         return
 
     latest_dir = max(list_of_dirs, key=lambda p: p.stat().st_mtime)
@@ -136,26 +144,65 @@ names: [{', '.join(f"'{name}'" for name in class_names)}]
         file.write(yaml_content)
     return yaml_path
 
-def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path, project_name):
+def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
+               project_name, custom_model_path=None):
+    """Train a YOLO model.
+
+    Parameters
+    ----------
+    model_type:        Ultralytics model name without the .pt suffix (e.g. 'yolov8n').
+                       Ignored when custom_model_path is provided.
+    custom_model_path: Optional path to a .pt file to use as the training base.
+                       When provided this takes precedence over model_type.
+    """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = YOLO(f'{model_type}.pt').to(device)
-    results = model.train(data=data_yaml, epochs=epochs, batch=batch, imgsz=img_size, name=project_name, save=True)
-    copy_and_remove_latest_run_files(model_save_path, project_name)
+
+    # Resolve which weights file to load
+    if custom_model_path and os.path.isfile(custom_model_path):
+        model_file = custom_model_path
+        print(f"Using custom base model: {custom_model_path}")
+    elif model_type:
+        model_file = f'{model_type}.pt'
+    else:
+        raise ValueError("Either model_type or a valid custom_model_path must be provided.")
+
+    model = YOLO(model_file).to(device)
+
+    # Determine the Ultralytics task sub-directory used for this run.
+    # Check both the model_type name and the custom model filename so that
+    # segmentation custom models are also detected correctly.
+    seg_hint = (model_type and '-seg' in model_type) or (
+        custom_model_path and '-seg' in Path(custom_model_path).stem
+    )
+    task = 'segment' if seg_hint else 'detect'
+
+    results = model.train(
+        data=data_yaml, epochs=epochs, batch=batch,
+        imgsz=img_size, name=project_name, save=True,
+    )
+    copy_and_remove_latest_run_files(model_save_path, project_name, task)
     clean_up(os.path.dirname(data_yaml))
     return results
 
 def parse_args():
-    project_name = sys.argv[1]
-    train_data_path = sys.argv[2]
-    class_names = sys.argv[3].split(',')
-    model_save_path = sys.argv[4]
-    model_type = sys.argv[5]
-    img_size = int(sys.argv[6])
-    epochs = int(sys.argv[7])
-    yaml_path = sys.argv[8]
-    batch_size = int(sys.argv[9])
+    project_name      = sys.argv[1]
+    train_data_path   = sys.argv[2]
+    class_names       = sys.argv[3].split(',')
+    model_save_path   = sys.argv[4]
+    model_type        = sys.argv[5]
+    img_size          = int(sys.argv[6])
+    epochs            = int(sys.argv[7])
+    yaml_path         = sys.argv[8]
+    batch_size        = int(sys.argv[9])
+    # argv[10] is the custom model path (may be an empty string)
+    custom_model_path = sys.argv[10] if len(sys.argv) > 10 else None
+    if custom_model_path == "":
+        custom_model_path = None
 
-    results = train_yolo(yaml_path, model_type, img_size, batch_size, epochs, model_save_path, project_name)
+    results = train_yolo(
+        yaml_path, model_type, img_size, batch_size, epochs,
+        model_save_path, project_name, custom_model_path,
+    )
     print(f"Training completed. Model saved to {model_save_path}")
 
 if __name__ == '__main__':

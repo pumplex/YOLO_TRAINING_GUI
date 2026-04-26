@@ -112,19 +112,19 @@ class CameraDetection:
         # Use pathlib for path handling
         save_dir_path = Path(self.save_dir)
         
-        # オリジナル画像を保存（PNG形式で保存してクオリティを維持）
+        # Save original frame (PNG for lossless quality)
         origin_image_path = str(save_dir_path / f"{base_filename}_origin.png")
         cv2.imwrite(origin_image_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 9])
 
-        # 検出結果を描画
+        # Run detection and draw bounding boxes
         results = self.model(frame)
         self._draw_bounding_boxes(frame, results)
 
-        # 検出結果画像を保存（JPEG形式で容量を抑える）
+        # Save annotated frame (JPEG to reduce file size)
         detection_image_path = str(save_dir_path / f"{base_filename}_detection.jpg")
         cv2.imwrite(detection_image_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
-        # 検出結果のテキストを保存
+        # Save detection results as text
         txt_path = str(save_dir_path / f"{base_filename}_detection.txt")
         with open(txt_path, 'w', encoding='utf-8') as f:
             for result in results[0].boxes:

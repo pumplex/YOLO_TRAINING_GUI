@@ -1,128 +1,235 @@
+# 🚀 YOLO Training & Detection Studio
 
-# YOLO Train and Detect App “Complete Your Learning and Detection Seamlessly on This GUI”
+> A sleek, modern desktop GUI for training, evaluating, and deploying YOLO object-detection and segmentation models — no command line required.
 
-🎉 **NEW: 2025/05/29 ** We now support YOLOv12! Train and detect with the latest YOLO version. 🎉
+![YOLO Studio screenshot](https://github.com/SpreadKnowledge/YOLO_train_detection_GUI/assets/56751392/5ff31879-8756-4561-ad5e-a5f6b0529798)
 
-![スクリーンショット 2024-05-25 163018](https://github.com/SpreadKnowledge/YOLO_train_detection_GUI/assets/56751392/5ff31879-8756-4561-ad5e-a5f6b0529798)
+Whether you're training your first custom model or benchmarking multiple architectures side-by-side, **YOLO Studio** wraps the power of [Ultralytics](https://github.com/ultralytics/ultralytics) in a clean, tooltip-rich interface that gets out of your way. 🎯
 
-This application is a user-friendly GUI tool built with PyTorch, Ultralytics library, and CustomTkinter. It allows you to easily develop and train models such as YOLOv12, and perform object detection on images, videos, and webcam feeds using the trained models. The detection results can be saved for further analysis.
+---
 
-↓ Please watch the instructional video (in English) uploaded on YouTube to check out the specific operation.
-[![YOLO Train and Detect App Demo](https://img.youtube.com/vi/Jk-JkBn4Na0/0.jpg)](https://youtu.be/Jk-JkBn4Na0?si=hMqGkJ4YAjnaKbQW)
+## ✨ Features at a glance
 
-## Environment Setup
+| Feature | Details |
+|---------|---------|
+| 🏋 **Train** | Detection *and* segmentation models (YOLOv8 → YOLOv12) |
+| 📦 **Roboflow ZIP import** | One-click extraction & auto-configuration of Roboflow datasets |
+| 🔧 **Custom base model** | Fine-tune from any `.pt` weights file |
+| 🔍 **Detect** | Run inference on image / video folders |
+| 📷 **Camera** | Live webcam detection with frame capture |
+| 📊 **Benchmark** | Compare multiple models on the same dataset — accuracy, speed, size |
+| ⬇ **Export** | ONNX · TensorRT Engine · CoreML · TF SavedModel · TFLite |
+| 💡 **Tooltips** | Every control has a contextual help tip |
+| 🌙 **Appearance** | Dark / Light / System theme toggle |
 
-### Using venv
+---
 
-1. Clone this repository:
+## 🖥 Requirements
+
+- Python **3.10 or later**
+- Windows, macOS, or Linux
+- (Optional but strongly recommended) NVIDIA GPU with CUDA 12.x for fast training
+
+---
+
+## ⚙️ Installation
+
+### 1 — Clone this repository
+
 ```bash
-git clone https://github.com/SpreadKnowledge/YOLO_train_detection_GUI.git
+git clone -b copilot/update-gui-focused-ux-overhaul \
+    https://github.com/pumplex/YOLO_TRAINING_GUI.git
+cd YOLO_TRAINING_GUI
 ```
-2. Navigate to the project directory:
-```bash
-cd your-repository
-```
-3. Create a virtual environment:
+
+### 2 — Create a virtual environment
+
+**venv:**
 ```bash
 python -m venv venv
+# Windows
+venv\Scripts\activate
+# macOS / Linux
+source venv/bin/activate
 ```
-4. Activate the virtual environment:
-- For Windows:
-  ```
-  venv\Scripts\activate
-  ```
-- For macOS and Linux:
-  ```
-  source venv/bin/activate
-  ```
 
-5. Install the required dependencies:
+**Conda:**
+```bash
+conda create -n yolo-studio python=3.12
+conda activate yolo-studio
+```
+
+### 3 — Install PyTorch
+
+#### 🔥 GPU (NVIDIA CUDA 12.8 — recommended)
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
+#### 💻 CPU-only
+```bash
+pip install torch torchvision
+```
+
+> For other CUDA versions (11.8, 12.1 …) visit **https://pytorch.org/get-started/locally/**
+
+### 4 — Install remaining dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Using Anaconda
+### 5 — Run
 
-1. Clone this repository:
-```bash
-git clone https://github.com/SpreadKnowledge/YOLO_train_detection_GUI.git
-```
-2. Navigate to the project directory:
-```bash
-cd your-repository
-```
-3. Create a new Anaconda environment:
-```bash
-conda create --name yolo-app python=3.12
-```
-4. Activate the Anaconda environment:
-```bash
-conda activate yolo-app
-```
-5. Install the required dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-## Preparing Training Data
-
-Before training your YOLO model, you need to prepare the training data in the YOLO format. For each image, you should have a corresponding text file with the same name containing the object annotations. The text file should follow the format:
-```plaintext
-<class_id> <x_center> <y_center> <width> <height>
-```
-- `<class_id>`: Integer representing the class ID of the object.
-- `<x_center>`, `<y_center>`: Floating-point values representing the center coordinates of the object bounding box, normalized by the image width and height.
-- `<width>`, `<height>`: Floating-point values representing the width and height of the object bounding box, normalized by the image width and height.
-
-Place the image files and their corresponding annotation text files in the same directory.
-
-## Running the Application
-
-To run the YOLO Train and Detect App, execute the following command:
 ```bash
 python main.py
 ```
 
-## Application Features
+---
 
-### Train Tab
+## 📖 How to use
 
-In the Train tab, you can train your own YOLO model:
+### 🏋 Train tab
 
-1. Enter a project name (alphanumeric only).
-2. Select the directory containing your training data (images and annotation text files).
-3. Choose the directory where you want to save the trained model.
-4. Select the model size for YOLOv9 (Compact or Enhanced) or YOLOv8 (Nano, Small, Medium, Large, or ExtraLarge).
-5. Specify the input size for the CNN (e.g., 640).
-6. Set the number of epochs for training (e.g., 100).
-7. Enter the batch size for training (e.g., 16).
-8. Input the class names, one per line, in the provided text box.
-9. Click the "Start Training!" button to begin the training process.
+Train your own YOLO model from scratch or fine-tune an existing one.
 
-Note: Make sure to provide all the required information, or the training process will not start.
+1. **Import Roboflow ZIP** *(optional)* — see the section below, or:
+2. Select your **Training Data Folder** (see *Data format* below).
+3. Choose a **Model Save Folder** for the output weights.
+4. Pick a **Task Type**: Detection (bounding boxes) or Segmentation (pixel masks).
+5. Select a **YOLO Model** from the dropdown, or load a **Custom Base Model** (`.pt`).
+6. Fill in **Image Size**, **Epochs**, **Batch Size**, and **Class Names**.
+7. Click **▶ Start Training** — live output streams to the log panel.
 
-### Image/Video Tab
+> **Tip:** Hover over any control for a tooltip explaining what it does.
 
-In the Image/Video tab, you can perform object detection on images or videos:
+#### 📦 Roboflow dataset import
 
-1. Select the folder containing the images or videos you want to process.
-2. Choose the trained YOLO model file (.pt) for detection.
-3. Click the "Start Detection!" button to initiate the detection process.
-4. The detection results will be displayed in the application window.
-5. Use the navigation buttons (◀ and ▶) to browse through the processed images or video frames.
+Download your dataset from [roboflow.com](https://roboflow.com):
+- **Export → Format: YOLOv8** → **Download ZIP**
 
-Note: Ensure that you have selected the correct folders and model file, or the detection process will not work.
+Then in the Train tab:
+1. Click **📦 Import Roboflow ZIP…**
+2. Select the downloaded `.zip` file.
+3. Choose where to extract it.
+4. The app extracts the archive, patches paths, and **fills in class names automatically**.
+5. Review the settings and click **▶ Start Training**.
 
-### Camera Tab
+Expected ZIP structure (handled automatically):
+```
+dataset.zip/
+  data.yaml
+  train/images/*.jpg    train/labels/*.txt
+  valid/images/*.jpg    valid/labels/*.txt
+  test/images/*.jpg     test/labels/*.txt  (optional)
+```
 
-In the Camera tab, you can perform real-time object detection using a webcam:
+#### 📁 Manual data format
 
-1. Select the trained YOLO model file (.pt) for detection.
-2. Choose the directory where you want to save the detection results.
-3. Enter the camera ID (e.g., 0 for the default webcam).
-4. Click the "START" button to begin the real-time detection.
-5. The live camera feed with object detection will be displayed in the application window.
-6. Press the "ENTER" key to capture and save the current frame and its detection results.
-7. Click the "STOP" button to stop the real-time detection.
+If you're not using Roboflow, place image + annotation pairs in the same folder:
 
-Note: Make sure that you have selected the correct model file and save directory, and entered a valid camera ID, or the real-time detection will not function properly.
+```
+my_data/
+  photo1.jpg   photo1.txt
+  photo2.png   photo2.txt
+  ...
+```
+
+Each `.txt` file uses standard YOLO format (one object per line):
+```
+<class_id> <x_center> <y_center> <width> <height>
+```
+All coordinates are normalised 0 – 1 relative to image dimensions. The app automatically splits your data **80 % train / 20 % val**.
+
+---
+
+### 🔍 Detect tab
+
+Run YOLO inference on a folder of images or videos.
+
+1. Click **Select Images/Videos Folder**.
+2. Click **Select Model (.pt)** to load your trained weights.
+3. Click **▶ Start Detection**.
+4. Results are displayed in the viewer — use **◀ ▶** to browse.
+
+---
+
+### 📷 Camera tab
+
+Real-time detection on a live webcam feed.
+
+1. Select a **Model (.pt)** and optionally a **Save Folder**.
+2. Enter the **Camera ID** (usually `0` for the built-in webcam).
+3. Click **▶ START** — detection begins immediately.
+4. Press **Enter** at any time to capture and save the current frame.
+5. Click **■ STOP** to end the session.
+
+---
+
+### 📊 Benchmark tab
+
+Compare multiple trained models on the same dataset to find the best one for your use case.
+
+1. Click **➕ Add Model(s)** to load one or more `.pt` files.
+2. Click **Browse YAML…** to select the `data.yaml` for your dataset.
+3. Set the **Image Size** (match training size) and choose **Validation** or **Test** split.
+4. Click **▶ Run Benchmark**.
+
+Results are displayed in a colour-coded table:
+
+| Column | What it means |
+|--------|---------------|
+| **Accuracy (mAP50 ↑)** | How often the model detects the right thing, at least 50 % overlap — higher is better |
+| **Fine Accuracy (mAP50-95 ↑)** | Stricter accuracy across multiple overlap thresholds — harder to score well on |
+| **Precision ↑** | Of all detections made, what fraction were correct? (fewer false alarms) |
+| **Recall ↑** | Of all real objects in images, what fraction were found? (fewer misses) |
+| **Speed (ms/img ↓)** | Inference time per image — lower is faster |
+| **Size (MB)** | Model file size on disk |
+
+🟢 **Green** = most accurate · 🔵 **Blue** = fastest · 🟣 **Purple** = lightest
+
+---
+
+### ⬇ Export tab
+
+Convert a trained model to a deployment format.
+
+1. Click **Browse .pt…** to load your trained weights.
+2. Select an **Export Format**:
+   - **ONNX** — universal, runs anywhere (CPU · GPU · accelerators)
+   - **TensorRT Engine** — maximum throughput on NVIDIA GPUs *(see note below)*
+   - **CoreML** — Apple silicon / macOS / iOS
+   - **TF SavedModel** / **TFLite** — TensorFlow / mobile / embedded
+3. Click **⬇ Export Model**.
+
+> ℹ️ **TensorRT note:** The exported `.engine` file is compiled for the exact GPU it was built on
+> and cannot be transferred to a different GPU model. TensorRT ≥ 8 and CUDA must be installed
+> (`pip install tensorrt`). This is an **inference optimisation**, not a training format.
+
+---
+
+## �� Project structure
+
+```
+YOLO_TRAINING_GUI/
+├── main.py               # GUI entry point
+├── requirements.txt
+├── README.md
+└── src/
+    ├── train.py          # Training logic + YAML creation
+    ├── detect.py         # Image / video detection
+    ├── camera.py         # Live camera detection
+    ├── dataset.py        # Roboflow ZIP import utilities
+    ├── calculate_metrics.py
+    └── xml_to_txt.py
+```
+
+---
+
+## 🤝 Credits & licence
+
+Built on top of [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) and [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter).  
+Original project by [SpreadKnowledge](https://github.com/SpreadKnowledge/YOLO_train_detection_GUI).  
+Modernised and extended for [pumplex/YOLO_TRAINING_GUI](https://github.com/pumplex/YOLO_TRAINING_GUI).
+
+Licensed under the terms included in [LICENSE](LICENSE).

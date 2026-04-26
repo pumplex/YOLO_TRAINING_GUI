@@ -182,13 +182,29 @@ def move_detection_results(source_dir, target_dir):
     # Clean up source directory
     shutil.rmtree(str(source_dir))
 
+def _find_latest_predict_run():
+    """Find the most recently modified prediction run directory under runs/."""
+    candidates = []
+    runs_base = Path('runs')
+    if not runs_base.exists():
+        return None
+    for task_dir in runs_base.iterdir():
+        if task_dir.is_dir():
+            for run_dir in task_dir.iterdir():
+                if run_dir.is_dir():
+                    candidates.append(run_dir)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def detect_images(images_folder, model_path, callback=None):
     model = YOLO(model_path)
-    
+
     # Find all valid images and videos in the folder
     images_folder = normalize_path(images_folder)
     image_files, video_files = get_media_files(images_folder)
-    
+
     if not image_files and not video_files:
         print("No valid media files found in the directory")
         return
@@ -198,13 +214,12 @@ def detect_images(images_folder, model_path, callback=None):
 
     # Process images
     if image_files:
-        # Convert Path objects to strings for YOLO predict
         image_paths = [str(path) for path in image_files]
-        results = model.predict(image_paths, save=True, save_txt=True, imgsz=640, conf=0.5)
-        
-        runs_dir = Path('runs/detect')
-        latest_run_dir = max(runs_dir.glob('*'), key=lambda p: p.stat().st_mtime)
-        move_detection_results(latest_run_dir, results_dir)
+        model.predict(image_paths, save=True, save_txt=True, imgsz=640, conf=0.5)
+
+        latest_run_dir = _find_latest_predict_run()
+        if latest_run_dir:
+            move_detection_results(latest_run_dir, results_dir)
 
     # Process videos
     for video_file in video_files:

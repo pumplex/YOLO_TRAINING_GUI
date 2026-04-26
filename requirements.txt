@@ -1,4 +1,17 @@
+# YOLO Training & Detection Studio – Python dependencies
+#
+# ── PyTorch ────────────────────────────────────────────────────────────────
+# NVIDIA GPU (CUDA 12.8) — install THIS instead of the CPU line below:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+# For other CUDA versions see: https://pytorch.org/get-started/locally/
+#
+# CPU-only fallback (no GPU acceleration):
+torch
+torchvision
+
+# ── Core app dependencies ───────────────────────────────────────────────────
 customtkinter
 Pillow
-torch==2.2.1
 ultralytics
+# pyyaml is installed automatically as a transitive dependency of ultralytics
