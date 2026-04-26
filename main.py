@@ -2195,14 +2195,16 @@ def _live_video_thread() -> None:
         raw_task = _live_video_task_var.get() if _live_video_task_var else "Auto-detect"
         task = None if raw_task == "Auto-detect" else raw_task
         model = _YOLO(detection_model_path, task=task)
+        _device_controlled = True
         try:
             model.to(device)
         except (RuntimeError, AttributeError):
-            # TensorRT (.engine) models are compiled for a specific device and
-            # do not support being moved; the device is passed per-predict call.
+            # TensorRT (.engine) and ONNX models are compiled for a fixed device
+            # and cannot be moved.  Skip device= in predict() calls too.
+            _device_controlled = False
             import logging
             logging.getLogger(__name__).debug(
-                "model.to(device) skipped for %s (device-specific compiled model).",
+                "model.to(device) skipped for %s (compiled model).",
                 detection_model_path,
             )
 
@@ -2298,8 +2300,11 @@ def _live_video_thread() -> None:
             # Copy frames for screenshot use
             _live_video_raw_frame[0] = frame.copy()
 
-            results = model.predict(frame, save=False, conf=conf, half=half,
-                                    device=device, verbose=False)
+            results = model.predict(
+                frame, save=False, conf=conf, half=half,
+                device=device if _device_controlled else None,
+                verbose=False,
+            )
             annotated = results[0].plot()
             _live_video_ann_frame[0] = annotated
 
@@ -2437,7 +2442,8 @@ def _live_video_thread() -> None:
 
         cap.release()
     except Exception as exc:
-        root.after(0, lambda: messagebox.showerror("Live Video Error", str(exc)))
+        _err = str(exc)
+        root.after(0, lambda: messagebox.showerror("Live Video Error", _err))
     finally:
         global _live_video_running
         _live_video_running = False
