@@ -118,6 +118,7 @@ _MIN_AUDIO_FILE_SIZE_BYTES      = 100   # sanity check: file must be non-trivial
 _AUDIO_SYNC_CHECK_INTERVAL      = 15    # frames between sync checks (less frequent = fewer stutters)
 _AUDIO_SYNC_THRESHOLD_SECS      = 1.5   # seconds of drift before hard-resyncing
 _AUDIO_CALIB_FRAMES             = 40    # frames to sample before speed-matching audio
+_MIN_AUDIO_SPEED_RATIO          = 0.1   # guard against invalid/degenerate speed values
 
 
 def _atempo_filter_chain(speed: float) -> list:
@@ -293,6 +294,35 @@ def _audio_set_volume(volume: float) -> None:
         pass
 
 
+def _get_current_audio_speed_ratio(speed_ratio: float | None = None) -> float:
+    """Return a validated audio speed ratio."""
+    if speed_ratio is not None:
+        try:
+            return max(_MIN_AUDIO_SPEED_RATIO, float(speed_ratio))
+        except (TypeError, ValueError):
+            return 1.0
+    try:
+        speed_ratio = float(_live_audio_speed_ratio[0]) if _live_audio_speed_ratio else 1.0
+    except (TypeError, ValueError, IndexError):
+        speed_ratio = 1.0
+    return max(_MIN_AUDIO_SPEED_RATIO, speed_ratio)
+
+
+def _audio_video_time_to_track_pos(video_seconds: float, speed_ratio: float | None = None) -> float:
+    """Convert original video time to the adjusted audio-track timeline.
+
+    This maps a point on the original video timeline to the equivalent position
+    inside the speed-adjusted audio track. Faster playback (> 1.0) returns a
+    smaller track position; slower playback (< 1.0) returns a larger one.
+    """
+    return max(0.0, video_seconds / _get_current_audio_speed_ratio(speed_ratio))
+
+
+def _audio_track_elapsed_to_video_time(track_seconds: float) -> float:
+    """Convert elapsed adjusted-track time back to the original video timeline."""
+    return max(0.0, track_seconds * _get_current_audio_speed_ratio())
+
+
 def _cleanup_live_audio() -> None:
     """Stop audio and free any temporary audio resources."""
     global _live_audio_temp_file, _live_audio_bytes_io
@@ -304,6 +334,7 @@ def _cleanup_live_audio() -> None:
             pass
     _live_audio_temp_file = None
     _live_audio_bytes_io = None
+    _live_audio_speed_ratio[0] = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -652,7 +683,8 @@ _live_audio_sync_var      = None    # BooleanVar – sync audio to video (skip-b
 _live_audio_volume_var    = None    # DoubleVar  – playback volume (0.0–1.0)
 _live_audio_temp_file     = None    # path to extracted temp MP3 file (disk mode)
 _live_audio_bytes_io      = None    # io.BytesIO audio data (RAM mode)
-_live_audio_wall_start    = [0.0]   # wall-clock time when audio pos = 0 (for sync)
+_live_audio_wall_start    = [0.0]   # wall-clock time when adjusted audio track pos = 0
+_live_audio_speed_ratio   = [1.0]   # speed multiplier applied to the extracted audio track
 _live_video_is_url        = [False] # True when source is a URL/stream
 
 # Sidebar settings state (set once when sidebar is built)
@@ -2131,10 +2163,12 @@ def _start_live_video() -> None:
             file_path, bio = _audio_extract(_live_video_path)
             if bio is not None:
                 _live_audio_bytes_io = bio
+                _live_audio_speed_ratio[0] = 1.0
                 _live_audio_wall_start[0] = time.time()
                 _audio_play(bio, start_pos=0.0, volume=vol)
             elif file_path is not None:
                 _live_audio_temp_file = file_path
+                _live_audio_speed_ratio[0] = 1.0
                 _live_audio_wall_start[0] = time.time()
                 _audio_play(file_path, start_pos=0.0, volume=vol)
             else:
@@ -2254,10 +2288,12 @@ def _live_video_thread() -> None:
                     start = frame_index / fps
                     if bio is not None:
                         _live_audio_bytes_io = bio
+                        _live_audio_speed_ratio[0] = 1.0
                         _live_audio_wall_start[0] = time.time() - start
                         _audio_play(bio, start_pos=start, volume=volume)
                     elif file_path is not None:
                         _live_audio_temp_file = file_path
+                        _live_audio_speed_ratio[0] = 1.0
                         _live_audio_wall_start[0] = time.time() - start
                         _audio_play(file_path, start_pos=start, volume=volume)
 
@@ -2283,9 +2319,10 @@ def _live_video_thread() -> None:
                 # Seek audio to match video position
                 _audio_src = _live_audio_temp_file or _live_audio_bytes_io
                 if _audio_src:
-                    new_audio_pos = frame_idx / fps
-                    _audio_set_pos(new_audio_pos)
-                    _live_audio_wall_start[0] = time.time() - new_audio_pos
+                    video_pos = frame_idx / fps
+                    track_pos = _audio_video_time_to_track_pos(video_pos)
+                    _audio_set_pos(track_pos)
+                    _live_audio_wall_start[0] = time.time() - track_pos
 
             # ── Pause ─────────────────────────────────────────────────────
             if _live_video_paused:
@@ -2370,15 +2407,17 @@ def _live_video_thread() -> None:
 
                             file_path, bio = _audio_extract(video_path, speed=sp)
                             # Audio start position in the *speed-adjusted* track
-                            # corresponds to original_time * speed_ratio
-                            start_pos_adj = (start_frame / fps) * sp
+                            # corresponds to original_time / speed_ratio
+                            start_pos_adj = _audio_video_time_to_track_pos(start_frame / fps, sp)
                             if bio is not None:
                                 _live_audio_bytes_io = bio
-                                _live_audio_wall_start[0] = time.time() - (start_frame / fps)
+                                _live_audio_speed_ratio[0] = sp
+                                _live_audio_wall_start[0] = time.time() - start_pos_adj
                                 _audio_play(bio, start_pos=start_pos_adj, volume=vol)
                             elif file_path is not None:
                                 _live_audio_temp_file = file_path
-                                _live_audio_wall_start[0] = time.time() - (start_frame / fps)
+                                _live_audio_speed_ratio[0] = sp
+                                _live_audio_wall_start[0] = time.time() - start_pos_adj
                                 _audio_play(file_path, start_pos=start_pos_adj, volume=vol)
 
                         threading.Thread(target=_respeed, daemon=True).start()
@@ -2393,11 +2432,12 @@ def _live_video_thread() -> None:
                 and frame_idx > _AUDIO_CALIB_FRAMES
             ):
                 video_time = frame_idx / fps
-                elapsed_wall = time.time() - _live_audio_wall_start[0]
-                drift = video_time - elapsed_wall
+                elapsed_track = time.time() - _live_audio_wall_start[0]
+                drift = video_time - _audio_track_elapsed_to_video_time(elapsed_track)
                 if abs(drift) > _AUDIO_SYNC_THRESHOLD_SECS:
-                    _audio_set_pos(video_time)
-                    _live_audio_wall_start[0] = time.time() - video_time
+                    track_pos = _audio_video_time_to_track_pos(video_time)
+                    _audio_set_pos(track_pos)
+                    _live_audio_wall_start[0] = time.time() - track_pos
 
             # Prepare display image
             img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
