@@ -15,4 +15,5 @@ customtkinter
 Pillow
 ultralytics
 matplotlib
+pygame
 # pyyaml is installed automatically as a transitive dependency of ultralytics

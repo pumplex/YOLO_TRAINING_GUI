@@ -63,6 +63,181 @@ mimetypes.init()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Audio helpers  (Live Video tab)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Named constants for audio extraction and sync
+_AUDIO_EXTRACTION_TIMEOUT_SECS = 120   # max seconds to wait for ffmpeg
+_MIN_AUDIO_FILE_SIZE_BYTES      = 100   # sanity check: file must be non-trivial
+_AUDIO_SYNC_CHECK_INTERVAL      = 75    # frames between sync checks
+_AUDIO_SYNC_THRESHOLD_SECS      = 0.5   # seconds of drift before resyncing
+def _audio_extract_to_temp(video_path: str) -> str | None:
+    """Extract audio track from *video_path* to a temporary MP3 using ffmpeg.
+
+    Returns the temp-file path on success, None if ffmpeg is unavailable or
+    the video has no audio.
+    """
+    import tempfile
+    # Use NamedTemporaryFile to get a unique, collision-safe path
+    with tempfile.NamedTemporaryFile(
+        suffix=".mp3", prefix="yolo_studio_audio_", delete=False
+    ) as _tmp:
+        temp = _tmp.name
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+                temp,
+            ],
+            capture_output=True,
+            timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
+        )
+        if (
+            result.returncode == 0
+            and os.path.exists(temp)
+            and os.path.getsize(temp) > _MIN_AUDIO_FILE_SIZE_BYTES
+        ):
+            return temp
+    except FileNotFoundError:
+        pass  # ffmpeg not on PATH
+    except Exception:
+        pass
+    # Clean up file if extraction failed
+    try:
+        if os.path.exists(temp):
+            os.unlink(temp)
+    except Exception:
+        pass
+    return None
+
+
+def _audio_play(audio_file: str, start_pos: float = 0.0) -> bool:
+    """Start pygame audio playback from *start_pos* seconds. Returns True on success."""
+    try:
+        import pygame
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        pygame.mixer.music.load(audio_file)
+        pygame.mixer.music.play(start=start_pos)
+        return True
+    except Exception:
+        return False
+
+
+def _audio_pause() -> None:
+    try:
+        import pygame
+        if pygame.mixer.get_init():
+            pygame.mixer.music.pause()
+    except Exception:
+        pass
+
+
+def _audio_unpause() -> None:
+    try:
+        import pygame
+        if pygame.mixer.get_init():
+            pygame.mixer.music.unpause()
+    except Exception:
+        pass
+
+
+def _audio_stop() -> None:
+    try:
+        import pygame
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+    except Exception:
+        pass
+
+
+def _audio_set_pos(pos_seconds: float) -> None:
+    """Seek audio playback to *pos_seconds*. Works reliably for MP3 files."""
+    try:
+        import pygame
+        if pygame.mixer.get_init():
+            pygame.mixer.music.set_pos(pos_seconds)
+    except Exception:
+        pass
+
+
+def _cleanup_live_audio() -> None:
+    """Stop audio and remove the temporary audio file."""
+    global _live_audio_temp_file
+    _audio_stop()
+    if _live_audio_temp_file and os.path.exists(_live_audio_temp_file):
+        try:
+            os.unlink(_live_audio_temp_file)
+        except Exception:
+            pass
+    _live_audio_temp_file = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Training YAML auto-detection helper
+# ─────────────────────────────────────────────────────────────────────────────
+def _auto_load_training_yaml(folder_path: str) -> None:
+    """Search *folder_path* for data.yaml and, if found, auto-fill the Train tab.
+
+    Sets roboflow_yaml_path, patches the YAML to use absolute paths, and
+    populates the class-names textbox (if visible).
+    """
+    global roboflow_yaml_path
+    try:
+        from src.dataset import _find_yaml, parse_names, _patch_yaml
+        import yaml as _yaml
+
+        folder = Path(folder_path)
+        yaml_path = _find_yaml(folder)
+        if yaml_path is None:
+            return
+
+        with open(str(yaml_path), "r", encoding="utf-8") as _f:
+            data = _yaml.safe_load(_f) or {}
+
+        names = parse_names(data.get("names", []))
+        if not names:
+            return
+
+        # Patch YAML to use absolute paths so training works from any CWD
+        _patch_yaml(yaml_path, folder)
+        roboflow_yaml_path = str(yaml_path)
+
+        # Update class-names textbox if the Train tab is currently open
+        if _train_class_names_text is not None:
+            try:
+                if _train_class_names_text.winfo_exists():
+                    _train_class_names_text.delete("1.0", "end")
+                    _train_class_names_text.insert("1.0", "\n".join(names))
+            except Exception:
+                pass
+
+        # Update the Roboflow status label if visible
+        if _train_rf_status_label is not None:
+            try:
+                preview = ", ".join(names[:6]) + ("…" if len(names) > 6 else "")
+                _safe_label_configure(
+                    _train_rf_status_label,
+                    text=f"✅  data.yaml found  •  {len(names)} classes: {preview}",
+                    text_color="#4caf50",
+                )
+            except Exception:
+                pass
+
+        messagebox.showinfo(
+            "data.yaml Found",
+            f"A data.yaml file was found in the selected folder.\n\n"
+            f"Classes ({len(names)}): "
+            f"{', '.join(names[:8])}{'…' if len(names) > 8 else ''}\n\n"
+            "Class names have been filled in automatically.\n"
+            "The dataset YAML will be used directly for training.",
+        )
+    except Exception:
+        pass  # silently skip – manual entry still works
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Tooltip helper
 # ─────────────────────────────────────────────────────────────────────────────
 class Tooltip:
@@ -308,6 +483,14 @@ _detect_workers_var       = None        # StringVar for workers
 _detect_task_var          = None        # StringVar for model task override
 _detect_progress_label    = None        # text progress label
 _detect_nav_bar           = None        # bottom nav bar in detect view
+_detect_zoom_var          = None        # DoubleVar – image preview zoom level
+
+# Train tab widget references
+_train_class_names_text   = None    # CTkTextbox – class names in Train tab
+_train_rf_status_label    = None    # status label for YAML auto-detection
+
+# Camera tab state
+_camera_half_var          = None    # BooleanVar – FP16 for camera inference
 
 # Live-video tab state
 _live_video_path          = ""
@@ -329,6 +512,13 @@ _live_video_raw_frame     = [None]  # latest raw BGR frame (screenshots)
 _live_video_ann_frame     = [None]  # latest annotated BGR frame (screenshots)
 _live_video_half_var      = None    # BooleanVar – FP16 inference
 _live_video_conf_var      = None    # DoubleVar  – confidence threshold
+
+# Live-video audio state
+_live_audio_enabled_var   = None    # BooleanVar – enable audio playback
+_live_audio_sync_var      = None    # BooleanVar – sync audio to video (skip-based)
+_live_audio_temp_file     = None    # path to extracted temp MP3 file
+_live_audio_wall_start    = [0.0]   # wall-clock time when audio pos = 0 (for sync)
+_live_video_is_url        = [False] # True when source is a URL/stream
 
 # Training queue state
 _train_queue              = []          # list of dict with training job configs
@@ -433,7 +623,8 @@ def update_image() -> None:
     img_w, img_h = img.size
     max_w = max(1, image_label.winfo_width())
     max_h = max(1, image_label.winfo_height())
-    scale = min(max_w / img_w, max_h / img_h)
+    zoom = _detect_zoom_var.get() if _detect_zoom_var is not None else 1.0
+    scale = min(max_w / img_w, max_h / img_h) * zoom
     img = img.resize(
         (max(1, int(img_w * scale)), max(1, int(img_h * scale))),
         Image.Resampling.LANCZOS,
@@ -471,13 +662,18 @@ def on_sidebar_select(key: str) -> None:
     global _detect_start_btn, _detect_controls, _detect_file_count_label
     global _detect_model_info_label, _detect_conf_var, _detect_half_var
     global _detect_workers_var, _detect_task_var, _detect_progress_label, _detect_nav_bar
+    global _detect_zoom_var
     global _live_video_label, _live_video_status_label, _live_video_start_btn, _live_video_bar
     global _live_video_pause_btn, _live_video_seek_slider, _live_video_half_var
     global _live_video_conf_var, _live_video_paused
+    global _live_audio_enabled_var, _live_audio_sync_var
     global _train_queue_frame
+    global _train_class_names_text, _train_rf_status_label
+    global _camera_half_var
 
-    # Stop live video playback if running
+    # Stop live video playback and clean up audio if running
     _live_video_cancel_flag[0] = True
+    _cleanup_live_audio()
 
     clear_frame(main_frame)
 
@@ -500,6 +696,7 @@ def on_sidebar_select(key: str) -> None:
     _detect_task_var = None
     _detect_progress_label = None
     _detect_nav_bar = None
+    _detect_zoom_var = None
     _live_video_label = None
     _live_video_status_label = None
     _live_video_start_btn = None
@@ -509,7 +706,12 @@ def on_sidebar_select(key: str) -> None:
     _live_video_half_var = None
     _live_video_conf_var = None
     _live_video_paused = False
+    _live_audio_enabled_var = None
+    _live_audio_sync_var = None
     _train_queue_frame = None
+    _train_class_names_text = None
+    _train_rf_status_label = None
+    _camera_half_var = None
 
     if key == "Train":
         show_ai_train_window()
@@ -577,6 +779,9 @@ def show_ai_train_window() -> None:
         config_panel, text="No Roboflow dataset loaded",
         font=("Segoe UI", 11), text_color="gray", anchor="w",
     )
+
+    global _train_rf_status_label
+    _train_rf_status_label = _rf_status_label
 
     def _do_roboflow_import():
         global train_data_path, roboflow_yaml_path, train_data_label
@@ -876,8 +1081,13 @@ def show_ai_train_window() -> None:
         "  cat\n"
         "  dog\n"
         "  car\n\n"
-        "If you imported a Roboflow ZIP, these are filled automatically.",
+        "If you imported a Roboflow ZIP or selected a folder with data.yaml,\n"
+        "these are filled automatically.",
     )
+
+    # Store reference so select_train_data() can auto-fill it
+    global _train_class_names_text
+    _train_class_names_text = class_names_text
     _sep()
 
     # ── Training queue ─────────────────────────────────────────────────────
@@ -1215,42 +1425,74 @@ def show_image_detection_window() -> None:
     viewer.place(relx=0.29, rely=0, relwidth=0.71, relheight=1.0)
 
     image_label = tk.Label(viewer, bg="#0d1117")
-    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
+    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.85)
 
-    # Bottom navigation bar
-    _detect_nav_bar = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#1e1e2e", height=50)
-    _detect_nav_bar.place(relx=0, rely=0.88, relwidth=1.0, relheight=0.12)
+    # Bottom navigation bar (taller to accommodate zoom slider)
+    _detect_nav_bar = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#1e1e2e")
+    _detect_nav_bar.place(relx=0, rely=0.85, relwidth=1.0, relheight=0.15)
 
+    # ── Row 1: navigation controls (top half of bar) ─────────────────────
     ctk.CTkButton(
         _detect_nav_bar, text="◀", command=show_prev_image,
         fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
-    ).place(relx=0.01, rely=0.1, relwidth=0.08, relheight=0.8)
+    ).place(relx=0.01, rely=0.05, relwidth=0.07, relheight=0.40)
 
     image_index_label = ctk.CTkLabel(_detect_nav_bar, text="No results", font=("Segoe UI", 13))
-    image_index_label.place(relx=0.10, rely=0.1, relwidth=0.20, relheight=0.8)
+    image_index_label.place(relx=0.09, rely=0.05, relwidth=0.18, relheight=0.40)
 
     ctk.CTkButton(
         _detect_nav_bar, text="▶", command=show_next_image,
         fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
-    ).place(relx=0.31, rely=0.1, relwidth=0.08, relheight=0.8)
+    ).place(relx=0.28, rely=0.05, relwidth=0.07, relheight=0.40)
 
     ctk.CTkButton(
         _detect_nav_bar, text="⛶  Full Screen", command=_open_fullscreen_image,
         fg_color="#37474f", hover_color="#263238",
         font=("Segoe UI", 12), height=32,
-    ).place(relx=0.42, rely=0.1, relwidth=0.18, relheight=0.8)
+    ).place(relx=0.37, rely=0.05, relwidth=0.16, relheight=0.40)
     Tooltip(_detect_nav_bar.winfo_children()[-1], "Open the current image in a full-screen viewer.")
 
-    _detect_progress_label = ctk.CTkLabel(
-        _detect_nav_bar, text=_detect_progress_text, font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+    # ── Zoom slider (above progress bar, top-right of bar) ────────────────
+    global _detect_zoom_var
+    _detect_zoom_var = ctk.DoubleVar(value=1.0)
+
+    zoom_lbl = ctk.CTkLabel(
+        _detect_nav_bar, text="🔍 1.00×", font=("Segoe UI", 10), anchor="w"
     )
-    _detect_progress_label.place(relx=0.62, rely=0.05, relwidth=0.37, relheight=0.5)
+    zoom_lbl.place(relx=0.55, rely=0.05, relwidth=0.09, relheight=0.40)
+
+    zoom_slider = ctk.CTkSlider(
+        _detect_nav_bar, from_=0.25, to=2.0,
+        variable=_detect_zoom_var,
+        number_of_steps=int((2.0 - 0.25) / 0.05),  # 0.05× steps
+    )
+    zoom_slider.place(relx=0.55, rely=0.55, relwidth=0.09, relheight=0.35)
+
+    def _on_zoom(*_):
+        z = _detect_zoom_var.get()
+        zoom_lbl.configure(text=f"🔍 {z:.2f}×")
+        if image_paths:
+            update_image()
+
+    _detect_zoom_var.trace_add("write", _on_zoom)
+    Tooltip(
+        zoom_slider,
+        "Adjust the display size of the result image.\n"
+        "0.25× = thumbnail view   1.00× = fit to panel   2.00× = zoomed in",
+    )
+
+    # ── Progress label and bar (right side, both rows) ────────────────────
+    _detect_progress_label = ctk.CTkLabel(
+        _detect_nav_bar, text=_detect_progress_text,
+        font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+    )
+    _detect_progress_label.place(relx=0.66, rely=0.05, relwidth=0.33, relheight=0.40)
 
     detection_progress_bar = ctk.CTkProgressBar(
-        _detect_nav_bar, progress_color="#43a047", mode="determinate",
+        _detect_nav_bar, progress_color="#43a047", mode="determinate", height=6,
     )
     detection_progress_bar.set(_detect_progress_value)
-    detection_progress_bar.place(relx=0.62, rely=0.55, relwidth=0.37, relheight=0.35)
+    detection_progress_bar.place(relx=0.66, rely=0.62, relwidth=0.33, relheight=0.28)
 
     # Restore previously loaded result images if any exist
     if image_paths:
@@ -1261,7 +1503,7 @@ def show_image_detection_window() -> None:
 #  Camera Detection window
 # ─────────────────────────────────────────────────────────────────────────────
 def show_camera_detection_window() -> None:
-    global camera_detection, camera_id_entry, image_label, _camera_bar
+    global camera_detection, camera_id_entry, image_label, _camera_bar, _camera_half_var
 
     camera_detection = None
 
@@ -1278,24 +1520,37 @@ def show_camera_detection_window() -> None:
         bar, text="Select Model (.pt)",
         command=select_detection_model, font=FONT, height=34,
     )
-    sel_model_btn.place(relx=0.01, rely=0.1, relwidth=0.14, relheight=0.8)
+    sel_model_btn.place(relx=0.01, rely=0.1, relwidth=0.13, relheight=0.8)
     Tooltip(sel_model_btn, "Choose the YOLO .pt model file used for live camera inference.")
 
     sel_save_btn = ctk.CTkButton(
         bar, text="Save Folder",
         command=select_camera_save_folder, font=FONT, height=34,
     )
-    sel_save_btn.place(relx=0.17, rely=0.1, relwidth=0.11, relheight=0.8)
+    sel_save_btn.place(relx=0.16, rely=0.1, relwidth=0.10, relheight=0.8)
     Tooltip(sel_save_btn, "Folder where captured frames are saved when you press Enter.")
 
     camera_id_entry = ctk.CTkEntry(
         bar, placeholder_text="Camera ID  (e.g. 0)", font=FONT, height=34
     )
-    camera_id_entry.place(relx=0.30, rely=0.1, relwidth=0.15, relheight=0.8)
+    camera_id_entry.place(relx=0.28, rely=0.1, relwidth=0.14, relheight=0.8)
     Tooltip(
         camera_id_entry,
         "Index of the camera to open.\n"
         "0 = default webcam, 1 = second camera, etc.",
+    )
+
+    # Half-precision (FP16) toggle
+    _camera_half_var = ctk.BooleanVar(value=False)
+    half_chk = ctk.CTkCheckBox(
+        bar, text="FP16", variable=_camera_half_var, font=FONT,
+    )
+    half_chk.place(relx=0.44, rely=0.15, relwidth=0.07, relheight=0.70)
+    Tooltip(
+        half_chk,
+        "Run camera inference in half-precision (FP16) mode.\n"
+        "Approximately 2× faster on NVIDIA GPUs with Tensor Cores.\n"
+        "Requires a CUDA-capable GPU; ignored on CPU.",
     )
 
     ctk.CTkLabel(
@@ -1303,7 +1558,7 @@ def show_camera_detection_window() -> None:
         text="Press  Enter  to capture & save a frame",
         font=("Segoe UI", 11),
         text_color="gray",
-    ).place(relx=0.48, rely=0.1, relwidth=0.28, relheight=0.8)
+    ).place(relx=0.53, rely=0.1, relwidth=0.25, relheight=0.8)
 
     start_cam_btn = ctk.CTkButton(
         bar, text="▶  START",
@@ -1326,13 +1581,17 @@ def show_live_video_window() -> None:
     global _live_video_start_btn, _live_video_bar, detection_model_path
     global _live_video_pause_btn, _live_video_seek_slider
     global _live_video_half_var, _live_video_conf_var
+    global _live_audio_enabled_var, _live_audio_sync_var
 
     _live_video_path = ""
     _live_video_cancel_flag[0] = False
+    _live_video_is_url[0] = False
 
     # ── Display area ──────────────────────────────────────────────────────
     _live_video_label = tk.Label(main_frame, bg="#0d0d0d")
     _live_video_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.78)
+    # Left-click on the playback window toggles play/pause (only when playing)
+    _live_video_label.bind("<Button-1>", lambda _e: _toggle_pause() if _live_video_running else None)
 
     # ── Seek / position slider strip ──────────────────────────────────────
     seek_strip = ctk.CTkFrame(main_frame, corner_radius=0, fg_color="#111111", height=28)
@@ -1397,6 +1656,32 @@ def show_live_video_window() -> None:
     )
     Tooltip(conf_slider, "Minimum confidence for detections to be shown.")
 
+    # ── Audio controls ─────────────────────────────────────────────────────
+    _live_audio_enabled_var = ctk.BooleanVar(value=False)
+    audio_chk = ctk.CTkCheckBox(
+        bar, text="🔊 Audio", variable=_live_audio_enabled_var, font=FONT,
+    )
+    audio_chk.place(relx=0.31, rely=0.64, relwidth=0.09, relheight=0.30)
+    Tooltip(
+        audio_chk,
+        "Enable audio playback alongside the detection video.\n\n"
+        "Requires ffmpeg to be installed and available on your system PATH.\n"
+        "Audio is extracted from the video file at playback start.\n"
+        "Not available for URL/stream sources.",
+    )
+
+    _live_audio_sync_var = ctk.BooleanVar(value=True)
+    sync_chk = ctk.CTkCheckBox(
+        bar, text="Sync", variable=_live_audio_sync_var, font=FONT,
+    )
+    sync_chk.place(relx=0.41, rely=0.64, relwidth=0.08, relheight=0.30)
+    Tooltip(
+        sync_chk,
+        "Periodically re-synchronise audio to the current video frame.\n"
+        "Uses time-skipping: if audio falls more than 0.5 s behind the\n"
+        "video, it seeks forward to match.  Recommended to leave on.",
+    )
+
     # ── Buttons (right half) ───────────────────────────────────────────────
     def _pick_video():
         global _live_video_path
@@ -1411,7 +1696,49 @@ def show_live_video_window() -> None:
         )
         if p:
             _live_video_path = p
+            _live_video_is_url[0] = False
             _video_path_lbl.configure(text=Path(p).name, text_color="#4caf50")
+
+    def _pick_url():
+        """Prompt the user for a video URL and use it as the source."""
+        global _live_video_path
+        win = tk.Toplevel(root)
+        win.title("Open Video URL")
+        win.geometry("480x140")
+        win.resizable(False, False)
+        win.configure(bg="#1e1e2e")
+        win.grab_set()
+        ctk.CTkLabel(
+            win,
+            text="Enter video or stream URL:",
+            font=("Segoe UI", 12),
+        ).pack(pady=(16, 4), padx=20, anchor="w")
+        url_entry = ctk.CTkEntry(win, font=("Segoe UI", 12), height=36, width=440)
+        url_entry.pack(padx=20, pady=(0, 10))
+        url_entry.focus_set()
+
+        def _confirm():
+            url = url_entry.get().strip()
+            if url:
+                _live_video_path = url
+                _live_video_is_url[0] = True
+                short = url if len(url) <= 50 else url[:47] + "…"
+                _video_path_lbl.configure(text=short, text_color="#89b4fa")
+            win.destroy()
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20)
+        ctk.CTkButton(
+            btn_row, text="Open", fg_color="#1565c0",
+            font=("Segoe UI", 12), height=32,
+            command=_confirm,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ctk.CTkButton(
+            btn_row, text="Cancel", fg_color="#37474f",
+            font=("Segoe UI", 12), height=32,
+            command=win.destroy,
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+        win.bind("<Return>", lambda _e: _confirm())
 
     def _pick_model():
         global detection_model_path
@@ -1433,11 +1760,24 @@ def show_live_video_window() -> None:
             )
 
     vid_btn = ctk.CTkButton(bar, text="📂 Video", command=_pick_video, font=FONT, height=28)
-    vid_btn.place(relx=0.51, rely=0.06, relwidth=0.09, relheight=0.38)
+    vid_btn.place(relx=0.51, rely=0.06, relwidth=0.08, relheight=0.38)
     Tooltip(vid_btn, "Choose a local video file for detection playback.")
 
+    url_btn = ctk.CTkButton(
+        bar, text="🌐 URL", command=_pick_url,
+        fg_color="#37474f", hover_color="#263238",
+        font=FONT, height=28,
+    )
+    url_btn.place(relx=0.60, rely=0.06, relwidth=0.07, relheight=0.38)
+    Tooltip(
+        url_btn,
+        "Open a video or stream from a URL.\n\n"
+        "Supported schemes: http://, https://, rtsp://, rtp://, udp://\n\n"
+        "Note: audio playback is not available for URL sources.",
+    )
+
     model_btn = ctk.CTkButton(bar, text="🤖 Model", command=_pick_model, font=FONT, height=28)
-    model_btn.place(relx=0.61, rely=0.06, relwidth=0.09, relheight=0.38)
+    model_btn.place(relx=0.68, rely=0.06, relwidth=0.08, relheight=0.38)
     Tooltip(model_btn, "Choose a YOLO model (.pt, .onnx, or .engine) for detection.")
 
     def _toggle_pause():
@@ -1448,14 +1788,19 @@ def show_live_video_window() -> None:
                 text="▶ Resume" if _live_video_paused else "⏸ Pause",
                 fg_color="#e65100" if _live_video_paused else "#37474f",
             )
+        # Pause / unpause audio in sync
+        if _live_video_paused:
+            _audio_pause()
+        else:
+            _audio_unpause()
 
     _live_video_pause_btn = ctk.CTkButton(
         bar, text="⏸ Pause", command=_toggle_pause,
         fg_color="#37474f", hover_color="#263238",
         font=FONT, height=28,
     )
-    _live_video_pause_btn.place(relx=0.71, rely=0.06, relwidth=0.09, relheight=0.38)
-    Tooltip(_live_video_pause_btn, "Pause or resume video playback.")
+    _live_video_pause_btn.place(relx=0.77, rely=0.06, relwidth=0.08, relheight=0.38)
+    Tooltip(_live_video_pause_btn, "Pause or resume video playback.  You can also left-click the video image.")
 
     def _screenshot_dialog():
         if _live_video_raw_frame[0] is None:
@@ -1505,7 +1850,7 @@ def show_live_video_window() -> None:
         fg_color="#37474f", hover_color="#263238",
         font=FONT, height=28,
     )
-    shot_btn.place(relx=0.81, rely=0.06, relwidth=0.09, relheight=0.38)
+    shot_btn.place(relx=0.86, rely=0.06, relwidth=0.06, relheight=0.38)
     Tooltip(shot_btn, "Save the current frame as a PNG — choose with or without detection boxes.")
 
     def _toggle():
@@ -1521,7 +1866,7 @@ def show_live_video_window() -> None:
         fg_color="#2e7d32", hover_color="#1b5e20",
         font=("Segoe UI", 13, "bold"), height=28, text_color="white",
     )
-    _live_video_start_btn.place(relx=0.91, rely=0.06, relwidth=0.08, relheight=0.38)
+    _live_video_start_btn.place(relx=0.93, rely=0.06, relwidth=0.06, relheight=0.38)
     bar._start_btn = _live_video_start_btn
 
     # Second row of buttons
@@ -1550,6 +1895,7 @@ def show_live_video_window() -> None:
 
 def _start_live_video() -> None:
     global _live_video_running, _live_video_cancel_flag, _live_video_paused
+    global _live_audio_temp_file
 
     if not _live_video_path:
         messagebox.showerror("Error", "Please select a video file first.")
@@ -1575,6 +1921,39 @@ def _start_live_video() -> None:
     if _live_video_seek_slider:
         _live_video_seek_slider.set(0)
 
+    # ── Audio setup ───────────────────────────────────────────────────────
+    audio_want = _live_audio_enabled_var and _live_audio_enabled_var.get()
+    is_url = _live_video_is_url[0]
+    if audio_want and is_url:
+        messagebox.showinfo(
+            "Audio Unavailable",
+            "Audio playback is not supported for URL/stream sources.\n"
+            "It works only with local video files.",
+        )
+        audio_want = False
+
+    if audio_want:
+        _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
+        # Extract audio in a short background task before starting the main thread
+        def _extract_and_play():
+            global _live_audio_temp_file
+            temp = _audio_extract_to_temp(_live_video_path)
+            if temp:
+                _live_audio_temp_file = temp
+                _live_audio_wall_start[0] = time.time()
+                _audio_play(temp, start_pos=0.0)
+            else:
+                root.after(0, lambda: messagebox.showinfo(
+                    "Audio Unavailable",
+                    "Could not extract audio.\n\n"
+                    "Make sure ffmpeg is installed and available on your system PATH:\n"
+                    "  Windows: https://ffmpeg.org/download.html\n"
+                    "  macOS:   brew install ffmpeg\n"
+                    "  Linux:   sudo apt install ffmpeg\n\n"
+                    "Video will play without audio.",
+                ))
+        threading.Thread(target=_extract_and_play, daemon=True).start()
+
     threading.Thread(target=_live_video_thread, daemon=True).start()
 
 
@@ -1583,6 +1962,7 @@ def _stop_live_video() -> None:
     _live_video_running = False
     _live_video_paused = False
     _live_video_cancel_flag[0] = True
+    _cleanup_live_audio()
     if _live_video_start_btn:
         try:
             _live_video_start_btn.configure(
@@ -1604,6 +1984,7 @@ def _live_video_thread() -> None:
 
         half = _live_video_half_var.get() if _live_video_half_var else False
         conf = _live_video_conf_var.get() if _live_video_conf_var else 0.5
+        audio_sync = _live_audio_sync_var and _live_audio_sync_var.get()
 
         model = _YOLO(detection_model_path)
 
@@ -1628,6 +2009,11 @@ def _live_video_thread() -> None:
                 frame_idx = max(0, min(seek_target, total_frames - 1))
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 _live_video_seek_to[0] = -1
+                # Seek audio to match video position
+                if _live_audio_temp_file:
+                    new_audio_pos = frame_idx / fps
+                    _audio_set_pos(new_audio_pos)
+                    _live_audio_wall_start[0] = time.time() - new_audio_pos
 
             # ── Pause ─────────────────────────────────────────────────────
             if _live_video_paused:
@@ -1651,6 +2037,16 @@ def _live_video_thread() -> None:
             # Update shared state
             _live_video_frame_ref[0] = frame_idx
             frac = frame_idx / total_frames
+
+            # ── Periodic audio sync (skip-based) ──────────────────────────
+            if audio_sync and _live_audio_temp_file and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0 and frame_idx > 0:
+                video_time = frame_idx / fps
+                elapsed = time.time() - _live_audio_wall_start[0]
+                drift = video_time - elapsed
+                if abs(drift) > _AUDIO_SYNC_THRESHOLD_SECS:
+                    # Audio is drifting — re-sync to video position
+                    _audio_set_pos(video_time)
+                    _live_audio_wall_start[0] = time.time() - video_time
 
             # Prepare display image
             img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
@@ -2502,6 +2898,8 @@ def select_train_data() -> None:
         train_data_path = path
         short = Path(path).name or path
         _safe_label_configure(train_data_label, text=short, text_color="#4caf50")
+        # Automatically load data.yaml if present in the selected folder
+        _auto_load_training_yaml(path)
 
 
 def select_model_save_folder() -> None:
@@ -3341,7 +3739,8 @@ def start_camera_detection() -> None:
         )
 
     try:
-        camera_detection = CameraDetection(detection_model_path)
+        half = _camera_half_var.get() if _camera_half_var else False
+        camera_detection = CameraDetection(detection_model_path, half=half)
         camera_detection.start_camera(camera_id)
         if detection_save_dir:
             camera_detection.set_save_directory(detection_save_dir)
