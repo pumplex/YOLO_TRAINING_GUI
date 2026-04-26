@@ -1186,7 +1186,6 @@ def _stop_live_video() -> None:
 
 def _live_video_thread() -> None:
     """Background thread: open video, run YOLO frame-by-frame, display in label."""
-    import re
     try:
         from ultralytics import YOLO as _YOLO
         model = _YOLO(detection_model_path)
@@ -2082,7 +2081,7 @@ def _run_training_subprocess(
     yaml_path: str, selected_model_size: str, workers_int: int = 8
 ) -> None:
     global progress_bar, output_textbox
-    import re as _re
+    import re
 
     cmd = [
         sys.executable, "src/train.py",
@@ -2098,9 +2097,8 @@ def _run_training_subprocess(
         custom_model_path,
     ]
 
-    total_epochs = int(epochs) if str(epochs).isdigit() else 1
     # Pattern: lines like "      1/100  " at the start
-    epoch_re = _re.compile(r'^\s*(\d+)/(\d+)\s')
+    epoch_re = re.compile(r'^\s*(\d+)/(\d+)\s')
 
     def _update_train_progress(current_ep: int, total_ep: int) -> None:
         if progress_bar is None:
@@ -2525,8 +2523,8 @@ def _run_training_queue() -> None:
                     str(batch_size),
                     custom_model_path,
                 ]
-                import re as _re
-                epoch_re = _re.compile(r'^\s*(\d+)/(\d+)\s')
+                import re
+                epoch_re = re.compile(r'^\s*(\d+)/(\d+)\s')
                 total_ep = int(epochs) if str(epochs).isdigit() else 1
 
                 proc = subprocess.Popen(
