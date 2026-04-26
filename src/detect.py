@@ -4,7 +4,7 @@ import cv2
 import mimetypes
 from pathlib import Path
 from ultralytics import YOLO
-from typing import List, Union
+from typing import List, Union, Callable, Optional
 from datetime import datetime
 
 VALID_IMAGE_EXTENSIONS = {
@@ -78,8 +78,21 @@ def get_media_files(directory: Union[str, Path]) -> tuple[List[Path], List[Path]
         
     return sorted(image_files), sorted(video_files)
 
-def process_video(video_path: Path, model, output_dir: Path, conf_threshold: float = 0.5):
-    """Process a video file and save detection results"""
+def process_video(
+    video_path: Path,
+    model,
+    output_dir: Path,
+    conf_threshold: float = 0.5,
+    progress_callback: Optional[Callable] = None,
+    cancel_flag: Optional[Callable] = None,
+    half: bool = False,
+):
+    """Process a video file and save detection results.
+
+    progress_callback(frac: float, msg: str) is called every 30 frames where
+    frac is in [0, 1] representing progress through this video.
+    cancel_flag() returns True if processing should be stopped.
+    """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         print(f"Error opening video file: {video_path}")
@@ -89,7 +102,7 @@ def process_video(video_path: Path, model, output_dir: Path, conf_threshold: flo
     fps = cap.get(cv2.CAP_PROP_FPS)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total_frames = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 1)
 
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -104,30 +117,39 @@ def process_video(video_path: Path, model, output_dir: Path, conf_threshold: flo
 
     frame_count = 0
     detection_count = 0
-    
+
     while True:
+        if cancel_flag and cancel_flag():
+            break
+
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Update progress (every 30 frames to avoid excessive printing)
+        # Update progress every 30 frames
         if frame_count % 30 == 0:
-            progress = (frame_count / total_frames) * 100
-            print(f"\rProcessing video: {progress:.1f}% ({frame_count}/{total_frames} frames)", end="")
+            frac = frame_count / total_frames
+            if progress_callback:
+                progress_callback(
+                    frac,
+                    f"{video_path.name}: frame {frame_count}/{total_frames}",
+                )
+            else:
+                print(
+                    f"\rProcessing video: {frac * 100:.1f}% ({frame_count}/{total_frames} frames)",
+                    end="",
+                )
 
         # Detect objects in frame
-        results = model.predict(frame, save=False, conf=conf_threshold)
-        
+        results = model.predict(frame, save=False, conf=conf_threshold, half=half, verbose=False)
+
         # Only process frames with detections above threshold
         if len(results[0].boxes) > 0:
-            # Draw bounding boxes
             annotated_frame = results[0].plot()
 
-            # Save frame with detections
             frame_path = video_output_dir / f"frame_{detection_count:04d}.jpg"
             cv2.imwrite(str(frame_path), annotated_frame)
 
-            # Save detection results to txt
             txt_path = video_output_dir / f"frame_{detection_count:04d}.txt"
             with open(txt_path, 'w', encoding='utf-8') as f:
                 for box in results[0].boxes:
@@ -136,13 +158,10 @@ def process_video(video_path: Path, model, output_dir: Path, conf_threshold: flo
                         label = model.names[int(box.cls[0])]
                         confidence = box.conf[0]
                         f.write(f"{label} {confidence:.2f} {x1} {y1} {x2} {y2}\n")
-            
+
             detection_count += 1
-            
-            # Write frame to output video
             out.write(annotated_frame)
         else:
-            # Write original frame to video if no detections
             out.write(frame)
 
         frame_count += 1
@@ -150,11 +169,31 @@ def process_video(video_path: Path, model, output_dir: Path, conf_threshold: flo
     # Clean up
     cap.release()
     out.release()
-    
+
     print(f"\nVideo processing complete. {detection_count} frames with detections saved.")
     print(f"Output video saved to: {output_video_path}")
-    
+
     return video_output_dir
+
+
+def get_model_info(model_path: str) -> dict:
+    """Return basic metadata about a YOLO .pt file without full loading."""
+    p = Path(model_path)
+    info = {
+        "name": p.name,
+        "size_mb": p.stat().st_size / 1_048_576 if p.exists() else 0,
+        "num_classes": None,
+        "class_names": [],
+        "task": "unknown",
+    }
+    try:
+        model = YOLO(model_path)
+        info["num_classes"] = len(model.names)
+        info["class_names"] = list(model.names.values())
+        info["task"] = getattr(model, "task", "detect") or "detect"
+    except Exception:
+        pass
+    return info
 
 def move_detection_results(source_dir, target_dir):
     source_dir = normalize_path(source_dir)
@@ -198,10 +237,27 @@ def _find_latest_predict_run():
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def detect_images(images_folder, model_path, callback=None):
+def detect_images(
+    images_folder,
+    model_path,
+    callback=None,
+    progress_callback: Optional[Callable] = None,
+    conf_threshold: float = 0.5,
+    half: bool = False,
+    workers: int = 4,
+    cancel_flag: Optional[Callable] = None,
+):
+    """Run YOLO detection on all images/videos in a folder.
+
+    Parameters
+    ----------
+    progress_callback(current: int, total: int, msg: str)
+        Called after each image or video with the running count.
+    cancel_flag()
+        Callable that returns True when the user wants to abort.
+    """
     model = YOLO(model_path)
 
-    # Find all valid images and videos in the folder
     images_folder = normalize_path(images_folder)
     image_files, video_files = get_media_files(images_folder)
 
@@ -209,21 +265,53 @@ def detect_images(images_folder, model_path, callback=None):
         print("No valid media files found in the directory")
         return
 
+    total = len(image_files) + len(video_files)
+    current = 0
+
     results_dir = Path(images_folder) / 'results'
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process images
-    if image_files:
-        image_paths = [str(path) for path in image_files]
-        model.predict(image_paths, save=True, save_txt=True, imgsz=640, conf=0.5)
-
+    # Process images one-by-one so we can report per-image progress
+    for i, img_path in enumerate(image_files):
+        if cancel_flag and cancel_flag():
+            break
+        if progress_callback:
+            progress_callback(current, total, f"Image {i + 1}/{len(image_files)}: {img_path.name}")
+        model.predict(
+            str(img_path), save=True, save_txt=True, imgsz=640,
+            conf=conf_threshold, half=half, workers=workers, verbose=False,
+        )
         latest_run_dir = _find_latest_predict_run()
         if latest_run_dir:
             move_detection_results(latest_run_dir, results_dir)
+        current += 1
 
     # Process videos
-    for video_file in video_files:
-        process_video(video_file, model, results_dir)
+    for j, video_file in enumerate(video_files):
+        if cancel_flag and cancel_flag():
+            break
+
+        def _vid_cb(frac: float, msg: str, _cur=current, _tot=total):
+            if progress_callback:
+                # Map video frame fraction into the global progress slot for this video
+                progress_callback(int(_cur + frac), _tot, msg)
+
+        if progress_callback:
+            progress_callback(current, total, f"Video {j + 1}/{len(video_files)}: {video_file.name}")
+
+        process_video(
+            video_file, model, results_dir,
+            conf_threshold=conf_threshold,
+            progress_callback=_vid_cb,
+            cancel_flag=cancel_flag,
+            half=half,
+        )
+        current += 1
+        if progress_callback:
+            progress_callback(current, total, f"Video {j + 1}/{len(video_files)} complete")
+
+    if progress_callback:
+        progress_callback(total, total, "Detection complete")
 
     if callback:
         callback(str(results_dir))

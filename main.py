@@ -14,7 +14,7 @@ import mimetypes
 from pathlib import Path
 from queue import Queue, Empty
 from src.train import create_yaml
-from src.detect import detect_images, is_valid_image
+from src.detect import detect_images, is_valid_image, get_model_info, get_media_files
 from src.camera import CameraDetection
 
 mimetypes.init()
@@ -201,6 +201,33 @@ detect_model_label  = None
 export_model_label  = None
 export_status_label = None
 
+# Detect tab extended state
+_detection_running        = False
+_detection_cancel_flag    = [False]
+_detect_start_btn         = None        # reference to start/cancel button
+_detect_controls          = []          # widgets to disable during detection
+_detect_file_count_label  = None
+_detect_model_info_label  = None
+_detect_conf_var          = None        # DoubleVar for confidence threshold
+_detect_half_var          = None        # BooleanVar for FP16
+_detect_workers_var       = None        # StringVar for workers
+_detect_progress_label    = None        # text progress label
+_detect_nav_bar           = None        # bottom nav bar in detect view
+
+# Live-video tab state
+_live_video_path          = ""
+_live_video_running       = False
+_live_video_cancel_flag   = [False]
+_live_video_label         = None
+_live_video_status_label  = None
+_live_video_start_btn     = None
+_live_video_bar           = None
+
+# Training queue state
+_train_queue              = []          # list of dict with training job configs
+_train_queue_frame        = None        # frame listing queued jobs
+_train_queue_running      = False
+
 # Benchmark state
 _benchmark_models           = []   # list of .pt paths added by user
 _benchmark_results_frame    = None
@@ -281,6 +308,11 @@ def on_sidebar_select(key: str) -> None:
     global image_label, image_index_label, model_menu_widget
     global selected_model_var, task_type_var, _camera_bar
     global _benchmark_results_frame, _benchmark_run_btn, _benchmark_model_list_frame
+    global _detect_start_btn, _detect_controls, _detect_file_count_label
+    global _detect_model_info_label, _detect_conf_var, _detect_half_var
+    global _detect_workers_var, _detect_progress_label, _detect_nav_bar
+    global _live_video_label, _live_video_status_label, _live_video_start_btn, _live_video_bar
+    global _train_queue_frame
 
     clear_frame(main_frame)
 
@@ -293,6 +325,20 @@ def on_sidebar_select(key: str) -> None:
     _benchmark_results_frame = None
     _benchmark_run_btn = None
     _benchmark_model_list_frame = None
+    _detect_start_btn = None
+    _detect_controls = []
+    _detect_file_count_label = None
+    _detect_model_info_label = None
+    _detect_conf_var = None
+    _detect_half_var = None
+    _detect_workers_var = None
+    _detect_progress_label = None
+    _detect_nav_bar = None
+    _live_video_label = None
+    _live_video_status_label = None
+    _live_video_start_btn = None
+    _live_video_bar = None
+    _train_queue_frame = None
 
     if key == "Train":
         show_ai_train_window()
@@ -300,6 +346,8 @@ def on_sidebar_select(key: str) -> None:
         show_image_detection_window()
     elif key == "Camera":
         show_camera_detection_window()
+    elif key == "LiveVideo":
+        show_live_video_window()
     elif key == "Export":
         show_export_window()
     elif key == "Benchmark":
@@ -600,6 +648,18 @@ def show_ai_train_window() -> None:
         "Reduce (e.g. 8 or 4) if you run out of GPU/CPU memory.\n"
         "Larger batches generally train faster but need more RAM.",
     )
+
+    _lbl("Workers  (e.g. 8)")
+    workers_entry = ctk.CTkEntry(
+        config_panel, placeholder_text="8", font=FENT, height=36
+    )
+    workers_entry.pack(fill="x", **PAD)
+    Tooltip(
+        workers_entry,
+        "Number of CPU worker threads used to load data during training.\n"
+        "Higher values can speed up data loading on multi-core machines.\n"
+        "Reduce to 0 on Windows if you see multiprocessing errors.",
+    )
     _sep()
 
     # ── Class names ────────────────────────────────────────────────────────
@@ -618,21 +678,138 @@ def show_ai_train_window() -> None:
     )
     _sep()
 
-    # ── Start Training button ──────────────────────────────────────────────
+    # ── Training queue ─────────────────────────────────────────────────────
+    _lbl("Training Queue")
+
+    def _get_current_job_config():
+        pname   = project_name_entry.get().strip()
+        isize   = input_size_entry.get().strip() or "640"
+        ep      = epochs_entry.get().strip() or "100"
+        bs      = batch_size_entry.get().strip() or "16"
+        wk      = workers_entry.get().strip() or "8"
+        raw_cls = class_names_text.get("1.0", "end-1c")
+        cls     = [n.strip() for n in raw_cls.splitlines() if n.strip()]
+        sel_disp  = selected_model_var.get() if selected_model_var else ""
+        sel_model = MODEL_MAP.get(sel_disp, "")
+        return {
+            "project_name":      pname,
+            "input_size":        isize,
+            "epochs":            ep,
+            "batch_size":        bs,
+            "workers":           wk,
+            "class_names":       cls,
+            "selected_model":    sel_model,
+            "custom_model_path": custom_model_path,
+            "train_data_path":   train_data_path,
+            "model_save_path":   model_save_path,
+            "roboflow_yaml":     roboflow_yaml_path,
+        }
+
+    def _refresh_queue_list():
+        global _train_queue_frame
+        if _train_queue_frame is None:
+            return
+        for w in _train_queue_frame.winfo_children():
+            w.destroy()
+        if not _train_queue:
+            ctk.CTkLabel(
+                _train_queue_frame, text="No jobs queued.", font=("Segoe UI", 11),
+                text_color="gray",
+            ).pack(padx=8, pady=4)
+            return
+        for qi, job in enumerate(_train_queue):
+            row = ctk.CTkFrame(_train_queue_frame, fg_color="transparent")
+            row.pack(fill="x", padx=4, pady=1)
+            lbl_txt = f"{qi + 1}. {job['project_name'] or '(unnamed)'}  [{job['epochs']} ep]"
+            ctk.CTkLabel(row, text=lbl_txt, font=("Segoe UI", 11), anchor="w").pack(
+                side="left", fill="x", expand=True, padx=4
+            )
+            ctk.CTkButton(
+                row, text="✕", width=28, height=22,
+                fg_color="#c62828", hover_color="#b71c1c",
+                font=("Segoe UI", 10), text_color="white",
+                command=lambda x=qi: (_train_queue.pop(x), _refresh_queue_list()),
+            ).pack(side="right", padx=2)
+
+    global _train_queue_frame
+    _train_queue_frame = ctk.CTkScrollableFrame(
+        config_panel, height=90, fg_color="#2a2a3e", corner_radius=6
+    )
+    _train_queue_frame.pack(fill="x", padx=14, pady=4)
+    _refresh_queue_list()
+
+    q_btns = ctk.CTkFrame(config_panel, fg_color="transparent")
+    q_btns.pack(fill="x", padx=14, pady=(2, 4))
+
+    def _add_to_queue():
+        cfg = _get_current_job_config()
+        if not cfg["project_name"]:
+            messagebox.showerror("Queue", "Enter a Project Name before adding to queue.")
+            return
+        _train_queue.append(cfg)
+        _refresh_queue_list()
+        output_queue.put(f"✅ Added '{cfg['project_name']}' to queue ({len(_train_queue)} jobs)\n")
+
+    def _clear_queue():
+        _train_queue.clear()
+        _refresh_queue_list()
+
     ctk.CTkButton(
-        config_panel,
+        q_btns, text="➕ Add to Queue", font=("Segoe UI", 12), height=30,
+        fg_color="#1565c0", hover_color="#0d47a1",
+        command=_add_to_queue,
+    ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+    Tooltip(
+        q_btns.winfo_children()[0],
+        "Snapshot the current settings and add them as a queued training job.\n"
+        "Use 'Run Queue' to execute all queued jobs one after another.",
+    )
+    ctk.CTkButton(
+        q_btns, text="Clear Queue", font=("Segoe UI", 12), height=30,
+        fg_color="gray50", hover_color="gray35",
+        command=_clear_queue,
+    ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+    _sep()
+
+    # ── Start / Queue-Run buttons ──────────────────────────────────────────
+    btn_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    btn_row.pack(fill="x", padx=14, pady=(4, 12))
+
+    ctk.CTkButton(
+        btn_row,
         text="▶  Start Training",
         command=lambda: start_training(
             project_name_entry, input_size_entry, epochs_entry,
-            batch_size_entry, class_names_text,
+            batch_size_entry, class_names_text, workers_entry,
         ),
         fg_color="#2e7d32",
         hover_color="#1b5e20",
-        font=("Segoe UI", 15, "bold"),
-        height=50,
+        font=("Segoe UI", 14, "bold"),
+        height=46,
         text_color="white",
         corner_radius=8,
-    ).pack(fill="x", padx=14, pady=12)
+    ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+    Tooltip(
+        btn_row.winfo_children()[0],
+        "Start training immediately with the current settings.",
+    )
+
+    ctk.CTkButton(
+        btn_row,
+        text="▶▶  Run Queue",
+        command=_run_training_queue,
+        fg_color="#4a148c",
+        hover_color="#311b92",
+        font=("Segoe UI", 14, "bold"),
+        height=46,
+        text_color="white",
+        corner_radius=8,
+    ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+    Tooltip(
+        btn_row.winfo_children()[1],
+        "Run all queued training jobs in order.\n"
+        "Each job uses the settings it was queued with.",
+    )
 
     # ── Log panel ──────────────────────────────────────────────────────────
     ctk.CTkLabel(
@@ -642,77 +819,209 @@ def show_ai_train_window() -> None:
     output_textbox = ctk.CTkTextbox(
         log_panel, font=("Courier New", 12), corner_radius=8
     )
-    output_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+    output_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+
+    train_progress_label = ctk.CTkLabel(
+        log_panel, text="", font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+    )
+    train_progress_label.pack(anchor="w", padx=12)
 
     progress_bar = ctk.CTkProgressBar(
-        log_panel, progress_color="#43a047", mode="indeterminate", indeterminate_speed=0.7
+        log_panel, progress_color="#43a047", mode="determinate",
     )
-    progress_bar.pack(fill="x", padx=12, pady=(0, 10))
+    progress_bar.set(0)
+    progress_bar.pack(fill="x", padx=12, pady=(2, 10))
+    # Store label reference on progress_bar object for access in callback
+    progress_bar._progress_label = train_progress_label
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Image / Video Detection window
+#  Image / Video Detection window  (redesigned)
 # ─────────────────────────────────────────────────────────────────────────────
 def show_image_detection_window() -> None:
     global image_label, detection_progress_bar, image_index_label
     global detect_folder_label, detect_model_label
+    global _detect_start_btn, _detect_controls
+    global _detect_file_count_label, _detect_model_info_label
+    global _detect_conf_var, _detect_half_var, _detect_workers_var
+    global _detect_progress_label, _detect_nav_bar
 
-    image_label = tk.Label(main_frame, bg="#111827")
-    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.86)
+    FONT  = ("Segoe UI", 12)
+    FLAB  = ("Segoe UI", 12)
+    FBTN  = ("Segoe UI", 12)
 
-    bar = ctk.CTkFrame(main_frame, corner_radius=0, height=80)
-    bar.place(relx=0, rely=0.87, relwidth=1.0, relheight=0.13)
+    # ── Left config panel ─────────────────────────────────────────────────
+    cfg = ctk.CTkScrollableFrame(
+        main_frame, label_text="Detection Configuration",
+        label_font=("Segoe UI", 13, "bold"),
+        corner_radius=8, width=260,
+    )
+    cfg.place(relx=0, rely=0, relwidth=0.28, relheight=1.0)
 
-    FONT = ("Segoe UI", 12)
+    def _clbl(text):
+        l = ctk.CTkLabel(cfg, text=text, font=FLAB, anchor="w")
+        l.pack(fill="x", padx=12, pady=(8, 1))
+        return l
+
+    def _csep():
+        ctk.CTkFrame(cfg, height=1, fg_color="gray50").pack(fill="x", padx=12, pady=3)
+
+    # Folder section
+    _clbl("📁  Images / Videos Folder")
+    sel_folder_btn = ctk.CTkButton(
+        cfg, text="Browse Folder…", font=FBTN, height=34,
+        command=select_detection_images_folder,
+    )
+    sel_folder_btn.pack(fill="x", padx=12, pady=(4, 2))
+    Tooltip(sel_folder_btn, "Select a folder containing images or videos to run detection on.")
 
     detect_folder_label = ctk.CTkLabel(
-        bar, text="No folder selected", font=("Segoe UI", 11), text_color="gray", anchor="w",
+        cfg, text="No folder selected", font=("Segoe UI", 10),
+        text_color="gray", anchor="w", wraplength=220,
     )
-    detect_folder_label.place(relx=0.01, rely=0.03, relwidth=0.46, relheight=0.38)
+    detect_folder_label.pack(fill="x", padx=12)
 
-    detect_model_label = ctk.CTkLabel(
-        bar, text="No model selected", font=("Segoe UI", 11), text_color="gray", anchor="w",
+    _detect_file_count_label = ctk.CTkLabel(
+        cfg, text="", font=("Segoe UI", 10), text_color="#6c7086", anchor="w",
     )
-    detect_model_label.place(relx=0.50, rely=0.03, relwidth=0.48, relheight=0.38)
+    _detect_file_count_label.pack(fill="x", padx=12)
+    _csep()
 
-    sel_folder_btn = ctk.CTkButton(
-        bar, text="Select Images/Videos Folder",
-        command=select_detection_images_folder, font=FONT, height=34,
-    )
-    sel_folder_btn.place(relx=0.01, rely=0.48, relwidth=0.21, relheight=0.46)
-    Tooltip(sel_folder_btn, "Pick a folder with images or videos to run YOLO detection on.")
-
+    # Model section
+    _clbl("🤖  YOLO Model (.pt)")
     sel_model_btn = ctk.CTkButton(
-        bar, text="Select Model (.pt)",
-        command=select_detection_model, font=FONT, height=34,
+        cfg, text="Browse Model…", font=FBTN, height=34,
+        command=select_detection_model,
     )
-    sel_model_btn.place(relx=0.24, rely=0.48, relwidth=0.15, relheight=0.46)
+    sel_model_btn.pack(fill="x", padx=12, pady=(4, 2))
     Tooltip(sel_model_btn, "Choose a trained YOLO .pt weights file for inference.")
 
-    ctk.CTkButton(
-        bar, text="▶  Start Detection",
-        command=lambda: [detection_progress_bar.start(), start_image_detection()],
+    detect_model_label = ctk.CTkLabel(
+        cfg, text="No model selected", font=("Segoe UI", 10),
+        text_color="gray", anchor="w", wraplength=220,
+    )
+    detect_model_label.pack(fill="x", padx=12)
+
+    _detect_model_info_label = ctk.CTkLabel(
+        cfg, text="", font=("Segoe UI", 10), text_color="#6c7086",
+        anchor="w", wraplength=220, justify="left",
+    )
+    _detect_model_info_label.pack(fill="x", padx=12)
+    _csep()
+
+    # Confidence threshold
+    _clbl("Confidence Threshold")
+    _detect_conf_var = ctk.DoubleVar(value=0.5)
+    conf_slider = ctk.CTkSlider(
+        cfg, from_=0.01, to=1.0, variable=_detect_conf_var,
+        number_of_steps=99,
+    )
+    conf_slider.pack(fill="x", padx=12, pady=(4, 0))
+    conf_val_lbl = ctk.CTkLabel(cfg, text="0.50", font=("Segoe UI", 11), anchor="w")
+    conf_val_lbl.pack(padx=12, anchor="w")
+    _detect_conf_var.trace_add(
+        "write",
+        lambda *_: conf_val_lbl.configure(text=f"{_detect_conf_var.get():.2f}"),
+    )
+    Tooltip(
+        conf_slider,
+        "Only detections with confidence ≥ this value will be shown.\n"
+        "0.5 = 50% certainty required.  Lower → more detections (more false positives).\n"
+        "Higher → fewer but more reliable detections.",
+    )
+    _csep()
+
+    # Half-precision (FP16) option
+    _detect_half_var = ctk.BooleanVar(value=False)
+    half_chk = ctk.CTkCheckBox(
+        cfg, text="Half Precision (FP16)", variable=_detect_half_var, font=FLAB,
+    )
+    half_chk.pack(fill="x", padx=12, pady=(6, 2))
+    Tooltip(
+        half_chk,
+        "Run inference in 16-bit floating-point mode (FP16).\n"
+        "Roughly 2× faster on NVIDIA GPUs with Tensor Cores, using half the GPU memory.\n"
+        "Requires a CUDA-capable GPU; ignored on CPU.",
+    )
+
+    # Workers
+    _clbl("Data Workers")
+    _detect_workers_var = ctk.StringVar(value="4")
+    workers_entry_d = ctk.CTkEntry(cfg, textvariable=_detect_workers_var, font=FLAB, height=32)
+    workers_entry_d.pack(fill="x", padx=12, pady=(2, 4))
+    Tooltip(
+        workers_entry_d,
+        "Number of CPU threads used to load images in parallel.\n"
+        "Increase for faster throughput on multi-core machines.\n"
+        "Set to 0 on Windows if you see multiprocessing errors.",
+    )
+    _csep()
+
+    # Start / Cancel button
+    _detect_start_btn = ctk.CTkButton(
+        cfg, text="▶  Start Detection",
+        command=toggle_image_detection,
         fg_color="#1565c0", hover_color="#0d47a1",
-        font=("Segoe UI", 14, "bold"), height=34, text_color="white",
-    ).place(relx=0.41, rely=0.48, relwidth=0.18, relheight=0.46)
+        font=("Segoe UI", 14, "bold"), height=46,
+        text_color="white", corner_radius=8,
+    )
+    _detect_start_btn.pack(fill="x", padx=12, pady=(8, 4))
+
+    # Gallery button (enabled after results exist)
+    gallery_btn = ctk.CTkButton(
+        cfg, text="🖼  Open Gallery",
+        command=_open_gallery,
+        fg_color="#4a148c", hover_color="#311b92",
+        font=("Segoe UI", 13, "bold"), height=36,
+        text_color="white", corner_radius=8,
+    )
+    gallery_btn.pack(fill="x", padx=12, pady=(0, 8))
+    Tooltip(gallery_btn, "View all detection result images in a scrollable thumbnail gallery.\nClick any thumbnail to open it full-screen.")
+
+    _detect_controls = [sel_folder_btn, sel_model_btn, conf_slider, half_chk,
+                        workers_entry_d]
+
+    # ── Right: image viewer ────────────────────────────────────────────────
+    viewer = ctk.CTkFrame(main_frame, corner_radius=8, fg_color="#0d1117")
+    viewer.place(relx=0.29, rely=0, relwidth=0.71, relheight=1.0)
+
+    image_label = tk.Label(viewer, bg="#0d1117")
+    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
+
+    # Bottom navigation bar
+    _detect_nav_bar = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#1e1e2e", height=50)
+    _detect_nav_bar.place(relx=0, rely=0.88, relwidth=1.0, relheight=0.12)
 
     ctk.CTkButton(
-        bar, text="◀", command=show_prev_image,
-        fg_color="#1976d2", font=("Segoe UI", 20, "bold"), height=34,
-    ).place(relx=0.64, rely=0.48, relwidth=0.07, relheight=0.46)
+        _detect_nav_bar, text="◀", command=show_prev_image,
+        fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
+    ).place(relx=0.01, rely=0.1, relwidth=0.08, relheight=0.8)
+
+    image_index_label = ctk.CTkLabel(_detect_nav_bar, text="No results", font=("Segoe UI", 13))
+    image_index_label.place(relx=0.10, rely=0.1, relwidth=0.20, relheight=0.8)
 
     ctk.CTkButton(
-        bar, text="▶", command=show_next_image,
-        fg_color="#1976d2", font=("Segoe UI", 20, "bold"), height=34,
-    ).place(relx=0.72, rely=0.48, relwidth=0.07, relheight=0.46)
+        _detect_nav_bar, text="▶", command=show_next_image,
+        fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
+    ).place(relx=0.31, rely=0.1, relwidth=0.08, relheight=0.8)
 
-    image_index_label = ctk.CTkLabel(bar, text="", font=("Segoe UI", 14))
-    image_index_label.place(relx=0.80, rely=0.48, relwidth=0.09, relheight=0.46)
+    ctk.CTkButton(
+        _detect_nav_bar, text="⛶  Full Screen", command=_open_fullscreen_image,
+        fg_color="#37474f", hover_color="#263238",
+        font=("Segoe UI", 12), height=32,
+    ).place(relx=0.42, rely=0.1, relwidth=0.18, relheight=0.8)
+    Tooltip(_detect_nav_bar.winfo_children()[-1], "Open the current image in a full-screen viewer.")
+
+    _detect_progress_label = ctk.CTkLabel(
+        _detect_nav_bar, text="", font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+    )
+    _detect_progress_label.place(relx=0.62, rely=0.05, relwidth=0.37, relheight=0.5)
 
     detection_progress_bar = ctk.CTkProgressBar(
-        bar, progress_color="#43a047", mode="indeterminate"
+        _detect_nav_bar, progress_color="#43a047", mode="determinate",
     )
-    detection_progress_bar.place(relx=0.01, rely=0.96, relwidth=0.97, relheight=0.03)
+    detection_progress_bar.set(0)
+    detection_progress_bar.place(relx=0.62, rely=0.55, relwidth=0.37, relheight=0.35)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -774,6 +1083,175 @@ def show_camera_detection_window() -> None:
 
     root.bind("<Return>", lambda _e: save_callback())
     image_label.update_idletasks()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Live Video Detection window
+# ─────────────────────────────────────────────────────────────────────────────
+def show_live_video_window() -> None:
+    global _live_video_path, _live_video_label, _live_video_status_label
+    global _live_video_start_btn, _live_video_bar, detection_model_path
+
+    _live_video_path = ""
+
+    # Display area
+    _live_video_label = tk.Label(main_frame, bg="#0d0d0d")
+    _live_video_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.91)
+
+    bar = ctk.CTkFrame(main_frame, corner_radius=0, height=56)
+    bar.place(relx=0, rely=0.91, relwidth=1.0, relheight=0.09)
+    _live_video_bar = bar
+
+    FONT = ("Segoe UI", 12)
+    _video_path_lbl = ctk.CTkLabel(bar, text="No video selected", font=("Segoe UI", 11),
+                                   text_color="gray", anchor="w")
+    _video_path_lbl.place(relx=0.01, rely=0.05, relwidth=0.52, relheight=0.45)
+
+    _live_video_status_label = ctk.CTkLabel(bar, text="", font=("Segoe UI", 11),
+                                            text_color="#a6adc8", anchor="w")
+    _live_video_status_label.place(relx=0.01, rely=0.55, relwidth=0.52, relheight=0.42)
+
+    def _pick_video():
+        global _live_video_path
+        p = normalize_path(
+            filedialog.askopenfilename(
+                title="Select Video File",
+                filetypes=[
+                    ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"),
+                    ("All files", "*.*"),
+                ],
+            )
+        )
+        if p:
+            _live_video_path = p
+            _video_path_lbl.configure(text=Path(p).name, text_color="#4caf50")
+
+    vid_btn = ctk.CTkButton(bar, text="📂  Select Video", command=_pick_video,
+                             font=FONT, height=34)
+    vid_btn.place(relx=0.55, rely=0.1, relwidth=0.14, relheight=0.8)
+    Tooltip(vid_btn, "Choose a local video file to play back with live YOLO detection overlay.")
+
+    model_btn = ctk.CTkButton(bar, text="🤖  Select Model",
+                               command=select_detection_model, font=FONT, height=34)
+    model_btn.place(relx=0.71, rely=0.1, relwidth=0.13, relheight=0.8)
+    Tooltip(model_btn, "Choose the YOLO .pt model used for detection on the video frames.")
+
+    def _toggle():
+        global _live_video_running
+        if _live_video_running:
+            _stop_live_video()
+        else:
+            _start_live_video()
+
+    _live_video_start_btn = ctk.CTkButton(
+        bar, text="▶  PLAY",
+        command=_toggle,
+        fg_color="#2e7d32", hover_color="#1b5e20",
+        font=("Segoe UI", 14, "bold"), height=34, text_color="white",
+    )
+    _live_video_start_btn.place(relx=0.86, rely=0.1, relwidth=0.13, relheight=0.8)
+    bar._start_btn = _live_video_start_btn
+
+
+def _start_live_video() -> None:
+    global _live_video_running, _live_video_cancel_flag
+
+    if not _live_video_path:
+        messagebox.showerror("Error", "Please select a video file first.")
+        return
+    if not detection_model_path:
+        messagebox.showerror("Error", "Please select a YOLO model (.pt) first.")
+        return
+
+    _live_video_running = True
+    _live_video_cancel_flag[0] = False
+
+    if _live_video_start_btn:
+        _live_video_start_btn.configure(
+            text="■  STOP", fg_color="#c62828", hover_color="#b71c1c",
+        )
+
+    threading.Thread(target=_live_video_thread, daemon=True).start()
+
+
+def _stop_live_video() -> None:
+    global _live_video_running
+    _live_video_running = False
+    _live_video_cancel_flag[0] = True
+    if _live_video_start_btn:
+        _live_video_start_btn.configure(
+            text="▶  PLAY", fg_color="#2e7d32", hover_color="#1b5e20",
+        )
+
+
+def _live_video_thread() -> None:
+    """Background thread: open video, run YOLO frame-by-frame, display in label."""
+    import re
+    try:
+        from ultralytics import YOLO as _YOLO
+        model = _YOLO(detection_model_path)
+
+        cap = cv2.VideoCapture(_live_video_path)
+        if not cap.isOpened():
+            root.after(0, lambda: messagebox.showerror("Error", "Could not open video file."))
+            _stop_live_video()
+            return
+
+        total_frames = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 1)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        delay = max(1, int(1000 / fps))
+        frame_idx = 0
+
+        while not _live_video_cancel_flag[0]:
+            ret, frame = cap.read()
+            if not ret:
+                break  # video ended – stop
+
+            results = model.predict(frame, save=False, conf=0.5, verbose=False)
+            annotated = results[0].plot()
+
+            img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(img_rgb)
+
+            # Resize to fit label
+            try:
+                lw = max(_live_video_label.winfo_width(),  1)
+                lh = max(_live_video_label.winfo_height(), 1)
+            except Exception:
+                lw, lh = 1280, 720
+
+            scale = min(lw / pil_img.width, lh / pil_img.height)
+            nw = max(1, int(pil_img.width  * scale))
+            nh = max(1, int(pil_img.height * scale))
+            pil_img = pil_img.resize((nw, nh), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(pil_img)
+
+            det_count = len(results[0].boxes)
+            pct = frame_idx / total_frames * 100
+            status = f"Frame {frame_idx}/{total_frames}  ({pct:.0f}%)  |  {det_count} detection(s)"
+
+            def _update(ph=photo, st=status):
+                if _live_video_label:
+                    try:
+                        _live_video_label.config(image=ph)
+                        _live_video_label.image = ph
+                    except Exception:
+                        pass
+                _safe_label_configure(_live_video_status_label, text=st)
+
+            root.after(0, _update)
+            frame_idx += 1
+
+            import time
+            time.sleep(max(0.001, delay / 1000 - 0.01))
+
+        cap.release()
+    except Exception as exc:
+        root.after(0, lambda: messagebox.showerror("Live Video Error", str(exc)))
+    finally:
+        global _live_video_running
+        _live_video_running = False
+        root.after(0, lambda: _stop_live_video() if _live_video_start_btn else None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1090,6 +1568,7 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
     img_size   = int(img_size_str)
     split      = split_var.get()
     models_run = list(_benchmark_models)
+    total_m    = len(models_run)
 
     if _benchmark_run_btn:
         try:
@@ -1109,26 +1588,60 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
         font=("Segoe UI", 15, "bold"),
     ).pack(anchor="w", padx=16, pady=(14, 4))
 
+    bench_progress_lbl = ctk.CTkLabel(
+        _benchmark_results_frame, text=f"0 / {total_m} models",
+        font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+    )
+    bench_progress_lbl.pack(anchor="w", padx=16)
+
     log_tb = ctk.CTkTextbox(_benchmark_results_frame, font=("Courier New", 11), corner_radius=8)
     log_tb.pack(fill="both", expand=True, padx=14, pady=(0, 4))
 
     bench_bar = ctk.CTkProgressBar(
-        _benchmark_results_frame, progress_color="#43a047",
-        mode="indeterminate", indeterminate_speed=0.7,
+        _benchmark_results_frame, progress_color="#43a047", mode="determinate",
     )
+    bench_bar.set(0)
     bench_bar.pack(fill="x", padx=14, pady=(0, 10))
-    bench_bar.start()
 
     def _log(msg: str):
         root.after(0, lambda: _bench_append_log(log_tb, msg))
+
+    def _set_progress(done: int):
+        frac = done / total_m if total_m > 0 else 1.0
+        root.after(0, lambda: bench_bar.set(frac))
+        root.after(0, lambda: bench_progress_lbl.configure(text=f"{done} / {total_m} models"))
+
+    def _classify_error(exc: Exception) -> str:
+        """Return a user-friendly error message, especially for class-count mismatches."""
+        msg = str(exc)
+        if "out of bounds for axis" in msg or "index" in msg.lower() and "size" in msg.lower():
+            return (
+                f"{msg}\n"
+                "  ↳ This usually means the model was trained on a different number of classes\n"
+                "    than the benchmark dataset contains.  The model cannot be fairly evaluated\n"
+                "    on this dataset — results for this model have been skipped."
+            )
+        return msg
 
     def run_all():
         from ultralytics import YOLO
         all_metrics = []
         for i, mp in enumerate(models_run):
-            _log(f"\n[{i + 1}/{len(models_run)}]  Evaluating:  {Path(mp).name}\n")
+            _log(f"\n[{i + 1}/{total_m}]  Evaluating:  {Path(mp).name}\n")
+            _set_progress(i)
             try:
                 model  = YOLO(mp)
+
+                # Pre-flight: check class count compatibility
+                yaml_nc = _get_yaml_nc(yaml_path)
+                model_nc = len(model.names) if hasattr(model, "names") else None
+                if yaml_nc is not None and model_nc is not None and model_nc != yaml_nc:
+                    raise ValueError(
+                        f"Class count mismatch: model has {model_nc} classes but "
+                        f"dataset YAML declares {yaml_nc} classes.  "
+                        "Benchmark skipped for this model."
+                    )
+
                 result = model.val(data=yaml_path, imgsz=img_size, split=split, verbose=False)
                 m      = _extract_bench_metrics(mp, result)
                 all_metrics.append(m)
@@ -1137,7 +1650,8 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
                     f"Speed={m['speed_ms']:.1f} ms/img\n"
                 )
             except Exception as exc:
-                _log(f"  ❌  Error: {exc}\n")
+                friendly = _classify_error(exc)
+                _log(f"  ❌  Error: {friendly}\n")
                 all_metrics.append({
                     "name": Path(mp).name, "path": mp,
                     "map50": None, "map": None,
@@ -1146,9 +1660,25 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
                     "size_mb": Path(mp).stat().st_size / 1_048_576,
                     "error": str(exc),
                 })
+        _set_progress(total_m)
         root.after(0, lambda: _finish_benchmark(all_metrics, bench_bar))
 
     threading.Thread(target=run_all, daemon=True).start()
+
+
+def _get_yaml_nc(yaml_path: str) -> int | None:
+    """Read 'nc' (number of classes) from a YAML file without importing yaml."""
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("nc:"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
+                        return int(parts[1].strip())
+    except Exception:
+        pass
+    return None
 
 
 def _bench_append_log(textbox, msg: str) -> None:
@@ -1357,27 +1887,102 @@ def clear_custom_model() -> None:
 
 
 def select_detection_images_folder() -> None:
-    global detection_images_folder_path, detect_folder_label
+    global detection_images_folder_path, detect_folder_label, image_paths, current_image_index
     path = normalize_path(filedialog.askdirectory(title="Select Images/Videos Folder"))
-    if path:
-        detection_images_folder_path = path
-        short = Path(path).name or path
-        _safe_label_configure(detect_folder_label, text=f"Folder: {short}", text_color="#4caf50")
+    if not path:
+        return
+
+    detection_images_folder_path = path
+    short = Path(path).name or path
+    _safe_label_configure(detect_folder_label, text=short, text_color="#4caf50")
+
+    # Clear any previous results
+    image_paths = []
+    current_image_index = 0
+    if image_label:
+        try:
+            image_label.config(image="")
+            image_label.image = None
+        except Exception:
+            pass
+    _safe_label_configure(image_index_label, text="No results")
+    if detection_progress_bar:
+        try:
+            detection_progress_bar.set(0)
+        except Exception:
+            pass
+    _safe_label_configure(_detect_progress_label, text="")
+
+    # Count files in background (can be slow for large folders)
+    def _count():
+        try:
+            imgs, vids = get_media_files(path)
+            txt = f"{len(imgs)} image(s),  {len(vids)} video(s)"
+        except Exception:
+            txt = "Could not count files"
+        root.after(0, lambda: _safe_label_configure(_detect_file_count_label, text=txt))
+
+    threading.Thread(target=_count, daemon=True).start()
+    _safe_label_configure(_detect_file_count_label, text="Counting files…")
 
 
 def select_detection_model() -> None:
-    global detection_model_path, detect_model_label
+    global detection_model_path, detect_model_label, image_paths, current_image_index
     path = normalize_path(
         filedialog.askopenfilename(
             title="Select YOLO Model",
             filetypes=[("YOLO model", "*.pt"), ("All files", "*.*")],
         )
     )
-    if path:
-        detection_model_path = path
-        _safe_label_configure(
-            detect_model_label, text=f"Model: {Path(path).name}", text_color="#4caf50"
+    if not path:
+        return
+
+    detection_model_path = path
+    _safe_label_configure(detect_model_label, text=Path(path).name, text_color="#4caf50")
+
+    # Clear any previous results
+    image_paths = []
+    current_image_index = 0
+    if image_label:
+        try:
+            image_label.config(image="")
+            image_label.image = None
+        except Exception:
+            pass
+    _safe_label_configure(image_index_label, text="No results")
+    if detection_progress_bar:
+        try:
+            detection_progress_bar.set(0)
+        except Exception:
+            pass
+    _safe_label_configure(_detect_progress_label, text="")
+    _safe_label_configure(_detect_model_info_label, text="Loading model info…", text_color="#6c7086")
+
+    # Load model info in background thread
+    def _load_info():
+        try:
+            info = get_model_info(path)
+            nc   = info["num_classes"]
+            task = info["task"]
+            sz   = info["size_mb"]
+            if nc is not None:
+                classes_preview = ", ".join(info["class_names"][:5])
+                if len(info["class_names"]) > 5:
+                    classes_preview += f" … (+{len(info['class_names']) - 5} more)"
+                txt = (
+                    f"Size: {sz:.1f} MB  |  Task: {task}\n"
+                    f"{nc} class(es): {classes_preview}"
+                )
+            else:
+                txt = f"Size: {sz:.1f} MB"
+        except Exception as exc:
+            txt = f"Could not load info: {exc}"
+        root.after(
+            0,
+            lambda: _safe_label_configure(_detect_model_info_label, text=txt, text_color="#a6adc8"),
         )
+
+    threading.Thread(target=_load_info, daemon=True).start()
 
 
 def select_camera_save_folder() -> None:
@@ -1419,6 +2024,7 @@ def start_training(
     epochs_entry,
     batch_size_entry,
     class_names_text,
+    workers_entry=None,
 ) -> None:
     global project_name, train_data_path, model_save_path, custom_model_path
     global input_size, epochs, batch_size, class_names
@@ -1429,6 +2035,7 @@ def start_training(
     batch_val    = batch_size_entry.get().strip()
     raw_classes  = class_names_text.get("1.0", "end-1c")
     class_names  = [n.strip() for n in raw_classes.splitlines() if n.strip()]
+    workers_val  = workers_entry.get().strip() if workers_entry else "8"
 
     selected_display    = selected_model_var.get() if selected_model_var else ""
     selected_model_size = MODEL_MAP.get(selected_display, "")
@@ -1460,6 +2067,7 @@ def start_training(
 
     epochs     = epochs_val
     batch_size = batch_val
+    workers_int = int(workers_val) if workers_val.isdigit() else 8
 
     # Use the Roboflow YAML directly if one was imported, otherwise build one
     if roboflow_yaml_path:
@@ -1467,11 +2075,14 @@ def start_training(
     else:
         yaml_path = create_yaml(project_name, train_data_path, class_names, model_save_path)
 
-    _run_training_subprocess(yaml_path, selected_model_size)
+    _run_training_subprocess(yaml_path, selected_model_size, workers_int)
 
 
-def _run_training_subprocess(yaml_path: str, selected_model_size: str) -> None:
+def _run_training_subprocess(
+    yaml_path: str, selected_model_size: str, workers_int: int = 8
+) -> None:
     global progress_bar, output_textbox
+    import re as _re
 
     cmd = [
         sys.executable, "src/train.py",
@@ -1487,6 +2098,27 @@ def _run_training_subprocess(yaml_path: str, selected_model_size: str) -> None:
         custom_model_path,
     ]
 
+    total_epochs = int(epochs) if str(epochs).isdigit() else 1
+    # Pattern: lines like "      1/100  " at the start
+    epoch_re = _re.compile(r'^\s*(\d+)/(\d+)\s')
+
+    def _update_train_progress(current_ep: int, total_ep: int) -> None:
+        if progress_bar is None:
+            return
+        try:
+            if not progress_bar.winfo_exists():
+                return
+            frac = current_ep / max(total_ep, 1)
+            progress_bar.set(frac)
+            lbl = getattr(progress_bar, "_progress_label", None)
+            if lbl:
+                try:
+                    lbl.configure(text=f"Epoch {current_ep} / {total_ep}  ({frac * 100:.0f}%)")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def run() -> None:
         proc = subprocess.Popen(
             cmd,
@@ -1496,14 +2128,26 @@ def _run_training_subprocess(yaml_path: str, selected_model_size: str) -> None:
             encoding="utf-8",
             errors="replace",
         )
-        threading.Thread(
-            target=enqueue_output, args=(proc.stdout, output_queue), daemon=True
-        ).start()
+
+        def _reader():
+            for line in iter(proc.stdout.readline, ""):
+                output_queue.put(line)
+                m = epoch_re.match(line)
+                if m:
+                    ep_cur = int(m.group(1))
+                    ep_tot = int(m.group(2))
+                    root.after(0, lambda c=ep_cur, t=ep_tot: _update_train_progress(c, t))
+            proc.stdout.close()
+
+        threading.Thread(target=_reader, daemon=True).start()
         proc.wait()
         root.after(0, _training_finished)
 
     if progress_bar:
-        progress_bar.start()
+        try:
+            progress_bar.set(0)
+        except Exception:
+            pass
     threading.Thread(target=run, daemon=True).start()
 
 
@@ -1511,7 +2155,10 @@ def _training_finished() -> None:
     global progress_bar, output_textbox
     if progress_bar:
         try:
-            progress_bar.stop()
+            progress_bar.set(1.0)
+            lbl = getattr(progress_bar, "_progress_label", None)
+            if lbl:
+                lbl.configure(text="Training complete ✅")
         except Exception:
             pass
     try:
@@ -1525,26 +2172,94 @@ def _training_finished() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Image / Video detection logic
 # ─────────────────────────────────────────────────────────────────────────────
-def start_image_detection() -> None:
-    global detection_images_folder_path, detection_model_path
+def toggle_image_detection() -> None:
+    """Toggle between Start Detection and Cancel Detection."""
+    global _detection_running
+    if _detection_running:
+        _cancel_image_detection()
+    else:
+        _begin_image_detection()
+
+
+def _begin_image_detection() -> None:
+    global _detection_running, _detection_cancel_flag
 
     if not detection_images_folder_path:
         messagebox.showerror("Error", "Please select an images/videos folder first.")
-        if detection_progress_bar:
-            detection_progress_bar.stop()
         return
-
     if not detection_model_path:
         messagebox.showerror("Error", "Please select a YOLO model (.pt file) first.")
-        if detection_progress_bar:
-            detection_progress_bar.stop()
         return
+
+    _detection_running = True
+    _detection_cancel_flag[0] = False
+
+    # Update button appearance
+    if _detect_start_btn:
+        _detect_start_btn.configure(
+            text="⛔  Cancel Detection",
+            fg_color="#c62828",
+            hover_color="#b71c1c",
+        )
+
+    # Disable other controls
+    for w in _detect_controls:
+        try:
+            w.configure(state="disabled")
+        except Exception:
+            pass
+
+    # Reset progress bar
+    if detection_progress_bar:
+        try:
+            detection_progress_bar.set(0)
+        except Exception:
+            pass
+    _safe_label_configure(_detect_progress_label, text="Starting…")
+
+    # Collect options
+    conf = _detect_conf_var.get() if _detect_conf_var else 0.5
+    half = _detect_half_var.get() if _detect_half_var else False
+    try:
+        workers_val = int(_detect_workers_var.get()) if _detect_workers_var else 4
+    except Exception:
+        workers_val = 4
+
+    def _progress_cb(current: int, total: int, msg: str) -> None:
+        frac = current / max(total, 1)
+        root.after(0, lambda: _update_detect_progress(frac, current, total, msg))
 
     threading.Thread(
         target=detect_images,
-        args=(detection_images_folder_path, detection_model_path, _on_detection_complete),
+        kwargs=dict(
+            images_folder=detection_images_folder_path,
+            model_path=detection_model_path,
+            callback=_on_detection_complete,
+            progress_callback=_progress_cb,
+            conf_threshold=conf,
+            half=half,
+            workers=workers_val,
+            cancel_flag=lambda: _detection_cancel_flag[0],
+        ),
         daemon=True,
     ).start()
+
+
+def _cancel_image_detection() -> None:
+    global _detection_cancel_flag
+    _detection_cancel_flag[0] = True
+    _safe_label_configure(_detect_progress_label, text="Cancelling…")
+
+
+def _update_detect_progress(frac: float, current: int, total: int, msg: str) -> None:
+    if detection_progress_bar:
+        try:
+            detection_progress_bar.set(frac)
+        except Exception:
+            pass
+    pct_txt = f"{frac * 100:.0f}%  ({current}/{total})  {msg}"
+    _safe_label_configure(_detect_progress_label, text=pct_txt)
+    _safe_label_configure(image_index_label, text=f"{current}/{total}")
 
 
 def _on_detection_complete(results_dir: str) -> None:
@@ -1558,14 +2273,301 @@ def _on_detection_complete(results_dir: str) -> None:
 
 
 def _show_detection_results() -> None:
-    global detection_progress_bar
-    if detection_progress_bar:
+    global _detection_running
+    _detection_running = False
+
+    # Restore start button
+    if _detect_start_btn:
         try:
-            detection_progress_bar.stop()
+            _detect_start_btn.configure(
+                text="▶  Start Detection",
+                fg_color="#1565c0",
+                hover_color="#0d47a1",
+            )
         except Exception:
             pass
+
+    # Re-enable controls
+    for w in _detect_controls:
+        try:
+            w.configure(state="normal")
+        except Exception:
+            pass
+
+    if detection_progress_bar:
+        try:
+            detection_progress_bar.set(1.0 if image_paths else 0.0)
+        except Exception:
+            pass
+
     if image_paths:
+        n = len(image_paths)
+        _safe_label_configure(_detect_progress_label, text=f"Done – {n} result image(s)")
+        _safe_label_configure(image_index_label, text=f"1/{n}")
         update_image()
+    else:
+        _safe_label_configure(_detect_progress_label, text="No result images found")
+        _safe_label_configure(image_index_label, text="No results")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Gallery and fullscreen image viewers
+# ─────────────────────────────────────────────────────────────────────────────
+def _open_gallery() -> None:
+    """Open a Toplevel window showing all result images in a thumbnail grid."""
+    if not image_paths:
+        messagebox.showinfo("Gallery", "Run detection first to generate result images.")
+        return
+
+    win = tk.Toplevel(root)
+    win.title(f"Detection Gallery  ({len(image_paths)} images)")
+    win.geometry("1100x700")
+    win.configure(bg="#1e1e2e")
+
+    THUMB_SIZE = 180
+    COLS = 5
+
+    header = ctk.CTkLabel(
+        win,
+        text=f"🖼  Detection Gallery  —  {len(image_paths)} result image(s)",
+        font=("Segoe UI", 14, "bold"),
+    )
+    header.pack(pady=(10, 4))
+
+    scroll_frame = ctk.CTkScrollableFrame(win, corner_radius=0, fg_color="#1e1e2e")
+    scroll_frame.pack(fill="both", expand=True, padx=8, pady=8)
+
+    row_frame = None
+    _thumb_refs = []  # keep PhotoImage refs alive
+
+    def _open_full(idx: int) -> None:
+        _open_fullscreen_image(start_index=idx)
+
+    for i, path in enumerate(image_paths):
+        col = i % COLS
+        if col == 0:
+            row_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row_frame.pack(fill="x", pady=4)
+
+        cell = ctk.CTkFrame(row_frame, fg_color="#2a2a3e", corner_radius=6)
+        cell.pack(side="left", padx=6)
+
+        try:
+            img = Image.open(path)
+            img.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            photo = None
+
+        if photo:
+            _thumb_refs.append(photo)
+            btn = tk.Button(
+                cell, image=photo, bg="#2a2a3e", relief="flat",
+                cursor="hand2",
+                command=lambda idx=i: _open_full(idx),
+            )
+            btn.image = photo
+            btn.pack(padx=4, pady=(4, 2))
+        else:
+            ctk.CTkLabel(cell, text="⚠ load error", font=("Segoe UI", 10)).pack(
+                padx=4, pady=(4, 2)
+            )
+
+        name_lbl = ctk.CTkLabel(
+            cell, text=Path(path).name[:24], font=("Segoe UI", 9), text_color="#a6adc8"
+        )
+        name_lbl.pack(padx=4, pady=(0, 4))
+
+    # store refs on window to prevent GC
+    win._thumb_refs = _thumb_refs
+
+
+def _open_fullscreen_image(start_index: int | None = None) -> None:
+    """Open a fullscreen image viewer with prev/next navigation."""
+    if not image_paths:
+        return
+
+    idx = [start_index if start_index is not None else current_image_index]
+    idx[0] = max(0, min(idx[0], len(image_paths) - 1))
+
+    win = tk.Toplevel(root)
+    win.title("Fullscreen Detection Viewer")
+    sw, sh = get_screen_size()
+    win.geometry(f"{sw}x{sh}")
+    win.configure(bg="#000000")
+    win.attributes("-fullscreen", False)
+
+    img_lbl = tk.Label(win, bg="#000000")
+    img_lbl.place(relx=0, rely=0, relwidth=1.0, relheight=0.94)
+
+    nav = ctk.CTkFrame(win, corner_radius=0, fg_color="#1e1e2e", height=44)
+    nav.place(relx=0, rely=0.94, relwidth=1.0, relheight=0.06)
+
+    idx_lbl = ctk.CTkLabel(nav, text="", font=("Segoe UI", 13))
+    idx_lbl.place(relx=0.44, rely=0.1, relwidth=0.12, relheight=0.8)
+
+    def _show(i: int) -> None:
+        idx[0] = i % len(image_paths)
+        try:
+            pil_img = Image.open(image_paths[idx[0]])
+            dw = max(win.winfo_width(),  1)
+            dh = max(int(win.winfo_height() * 0.94), 1)
+            scale = min(dw / pil_img.width, dh / pil_img.height)
+            nw = max(1, int(pil_img.width  * scale))
+            nh = max(1, int(pil_img.height * scale))
+            pil_img = pil_img.resize((nw, nh), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(pil_img)
+            img_lbl.config(image=photo)
+            img_lbl.image = photo
+        except Exception:
+            pass
+        idx_lbl.configure(text=f"{idx[0] + 1} / {len(image_paths)}")
+
+    ctk.CTkButton(
+        nav, text="◀ Prev", command=lambda: _show(idx[0] - 1),
+        fg_color="#1976d2", font=("Segoe UI", 13, "bold"), height=34,
+    ).place(relx=0.36, rely=0.1, relwidth=0.08, relheight=0.8)
+
+    ctk.CTkButton(
+        nav, text="Next ▶", command=lambda: _show(idx[0] + 1),
+        fg_color="#1976d2", font=("Segoe UI", 13, "bold"), height=34,
+    ).place(relx=0.56, rely=0.1, relwidth=0.08, relheight=0.8)
+
+    ctk.CTkButton(
+        nav, text="✕  Close", command=win.destroy,
+        fg_color="#c62828", hover_color="#b71c1c",
+        font=("Segoe UI", 13, "bold"), height=34,
+    ).place(relx=0.85, rely=0.1, relwidth=0.10, relheight=0.8)
+
+    win.bind("<Left>",  lambda _e: _show(idx[0] - 1))
+    win.bind("<Right>", lambda _e: _show(idx[0] + 1))
+    win.bind("<Escape>", lambda _e: win.destroy())
+
+    win.after(100, lambda: _show(idx[0]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Training queue runner
+# ─────────────────────────────────────────────────────────────────────────────
+def _run_training_queue() -> None:
+    """Run all queued training jobs sequentially in a background thread."""
+    global _train_queue_running
+
+    if _train_queue_running:
+        messagebox.showinfo("Queue", "A queue run is already in progress.")
+        return
+    if not _train_queue:
+        messagebox.showinfo("Queue", "The training queue is empty.")
+        return
+
+    jobs = list(_train_queue)
+    _train_queue.clear()
+    if _train_queue_frame:
+        root.after(0, lambda: _refresh_queue_list_safe())
+
+    _train_queue_running = True
+
+    def _refresh_queue_list_safe():
+        for w in _train_queue_frame.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(
+            _train_queue_frame, text="Queue cleared – jobs running…",
+            font=("Segoe UI", 11), text_color="#64b5f6",
+        ).pack(padx=8, pady=4)
+
+    def run_queue():
+        global _train_queue_running
+        try:
+            for qi, job in enumerate(jobs):
+                output_queue.put(
+                    f"\n{'─'*50}\n"
+                    f"🏋  Queue job {qi + 1}/{len(jobs)}: {job['project_name']}\n"
+                    f"{'─'*50}\n"
+                )
+
+                # Restore globals from job config
+                global project_name, train_data_path, model_save_path, custom_model_path
+                global input_size, epochs, batch_size, class_names, roboflow_yaml_path
+
+                project_name      = job["project_name"]
+                train_data_path   = job["train_data_path"]
+                model_save_path   = job["model_save_path"]
+                custom_model_path = job["custom_model_path"]
+                input_size        = job["input_size"]
+                epochs            = job["epochs"]
+                batch_size        = job["batch_size"]
+                class_names       = job["class_names"]
+                roboflow_yaml_path = job["roboflow_yaml"]
+                workers_int       = int(job.get("workers", 8))
+
+                # Build YAML
+                if job["roboflow_yaml"]:
+                    yaml_path = job["roboflow_yaml"]
+                else:
+                    try:
+                        yaml_path = create_yaml(
+                            project_name, train_data_path, class_names, model_save_path
+                        )
+                    except Exception as exc:
+                        output_queue.put(f"❌ Failed to create YAML: {exc}\n")
+                        continue
+
+                cmd = [
+                    sys.executable, "src/train.py",
+                    project_name,
+                    train_data_path,
+                    ",".join(class_names),
+                    model_save_path,
+                    job["selected_model"],
+                    str(input_size),
+                    str(epochs),
+                    yaml_path,
+                    str(batch_size),
+                    custom_model_path,
+                ]
+                import re as _re
+                epoch_re = _re.compile(r'^\s*(\d+)/(\d+)\s')
+                total_ep = int(epochs) if str(epochs).isdigit() else 1
+
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                )
+                for line in iter(proc.stdout.readline, ""):
+                    output_queue.put(line)
+                    m = epoch_re.match(line)
+                    if m:
+                        ep_cur, ep_tot = int(m.group(1)), int(m.group(2))
+                        root.after(0, lambda c=ep_cur, t=ep_tot: _update_queue_bar(c, t, qi, len(jobs)))
+                proc.stdout.close()
+                proc.wait()
+                output_queue.put(f"\n✅  Job {qi + 1} complete: {project_name}\n")
+        finally:
+            _train_queue_running = False
+            output_queue.put(f"\n🎉  All {len(jobs)} queued training job(s) finished.\n")
+            root.after(0, lambda: progress_bar.set(1.0) if progress_bar else None)
+
+    threading.Thread(target=run_queue, daemon=True).start()
+
+
+def _update_queue_bar(ep_cur: int, ep_tot: int, job_idx: int, total_jobs: int) -> None:
+    if progress_bar is None:
+        return
+    try:
+        job_frac  = ep_cur / max(ep_tot, 1)
+        total_frac = (job_idx + job_frac) / max(total_jobs, 1)
+        progress_bar.set(total_frac)
+        lbl = getattr(progress_bar, "_progress_label", None)
+        if lbl:
+            lbl.configure(
+                text=(
+                    f"Job {job_idx + 1}/{total_jobs} — "
+                    f"Epoch {ep_cur}/{ep_tot}  ({total_frac * 100:.0f}%)"
+                )
+            )
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1705,6 +2707,7 @@ _NAV = [
     ("🏋  Train",       "Train",      "#89b4fa"),
     ("🔍  Detect",      "Detect",     "#a6e3a1"),
     ("📷  Camera",      "Camera",     "#fab387"),
+    ("🎬  Live Video",  "LiveVideo",  "#f2cdcd"),
     ("📊  Benchmark",   "Benchmark",  "#f9e2af"),
     ("⬇  Export",      "Export",     "#cba6f7"),
 ]
