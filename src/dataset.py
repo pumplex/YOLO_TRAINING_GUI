@@ -11,6 +11,7 @@ or an integer-keyed dict (Roboflow export).  Both are normalised to a list.
 """
 
 import shutil
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -147,6 +148,8 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
     * names dict → plain list
     * 'valid' key aliased to 'val' (Roboflow uses 'valid', Ultralytics wants 'val')
     * top-level 'path' key set to dataset_root
+    * val/valid paths that cannot be resolved fall back to the train split
+    * test path that cannot be resolved is removed
     """
     data = _load_yaml(yaml_path)
 
@@ -155,15 +158,27 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
         data["names"] = parse_names(data["names"])
         data["nc"] = len(data["names"])
 
+    yaml_dir = yaml_path.parent
+
+    def _resolve(value: str) -> str | None:
+        """Return an absolute path string if *value* resolves to an existing path, else None."""
+        p = Path(value)
+        if p.is_absolute():
+            return str(p).replace("\\", "/") if p.exists() else None
+        # Try relative to dataset_root first, then to the yaml's own directory
+        for base in (dataset_root, yaml_dir):
+            candidate = (base / value).resolve()
+            if candidate.exists():
+                return str(candidate).replace("\\", "/")
+        return None
+
     # Resolve relative path values to absolute
     for key in ("train", "val", "valid", "test"):
         if key not in data:
             continue
-        val = str(data[key])
-        if not Path(val).is_absolute():
-            candidate = (dataset_root / val).resolve()
-            if candidate.exists():
-                data[key] = str(candidate).replace("\\", "/")
+        resolved = _resolve(str(data[key]))
+        if resolved is not None:
+            data[key] = resolved
 
     # 'valid' → 'val' alias for Ultralytics
     if "valid" in data and "val" not in data:
@@ -171,6 +186,44 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
 
     # Top-level path key (Ultralytics uses this as dataset root)
     data["path"] = str(dataset_root).replace("\\", "/")
+
+    # Determine resolved train path to use as a fallback for missing splits
+    train_resolved = _resolve(str(data["train"])) if data.get("train") else None
+
+    # val/valid: if the path still does not exist on disk, fall back to train
+    for key in ("val", "valid"):
+        if key not in data:
+            continue
+        current = str(data[key])
+        if not Path(current).exists():
+            if train_resolved:
+                warnings.warn(
+                    f"'{key}' path '{current}' not found. "
+                    "Falling back to the train split for validation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                data[key] = train_resolved
+            else:
+                warnings.warn(
+                    f"'{key}' path '{current}' not found and no train fallback is available. "
+                    f"Removing '{key}' from the dataset configuration.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                del data[key]
+
+    # test: remove entirely if the path does not exist
+    if "test" in data:
+        current = str(data["test"])
+        if not Path(current).exists():
+            warnings.warn(
+                f"'test' path '{current}' not found. "
+                "Removing 'test' from the dataset configuration.",
+                UserWarning,
+                stacklevel=2,
+            )
+            del data["test"]
 
     _write_yaml(yaml_path, data)
 
