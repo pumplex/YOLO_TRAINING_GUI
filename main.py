@@ -609,6 +609,7 @@ _live_video_raw_frame     = [None]  # latest raw BGR frame (screenshots)
 _live_video_ann_frame     = [None]  # latest annotated BGR frame (screenshots)
 _live_video_half_var      = None    # BooleanVar – FP16 inference
 _live_video_conf_var      = None    # DoubleVar  – confidence threshold
+_live_video_task_var      = None    # StringVar  – model task override (for TensorRT/ONNX)
 
 # Live-video audio state
 _live_audio_enabled_var   = None    # BooleanVar – enable audio playback
@@ -1684,7 +1685,7 @@ def show_live_video_window() -> None:
     global _live_video_path, _live_video_label, _live_video_status_label
     global _live_video_start_btn, _live_video_bar, detection_model_path
     global _live_video_pause_btn, _live_video_seek_slider
-    global _live_video_half_var, _live_video_conf_var
+    global _live_video_half_var, _live_video_conf_var, _live_video_task_var
     global _live_audio_enabled_var, _live_audio_sync_var, _live_audio_volume_var
 
     _live_video_path = ""
@@ -1994,6 +1995,25 @@ def show_live_video_window() -> None:
     bar._start_btn = _live_video_start_btn
 
     # Second row of buttons
+    # ── Task override (required for TensorRT / ONNX exported models) ──────
+    _LIVE_TASK_OPTIONS = ["Auto-detect", "detect", "segment", "classify", "pose", "obb"]
+    _live_video_task_var = ctk.StringVar(value=_LIVE_TASK_OPTIONS[0])
+    task_lbl = ctk.CTkLabel(bar, text="Task:", font=FONT, anchor="w")
+    task_lbl.place(relx=0.01, rely=0.56, relwidth=0.04, relheight=0.30)
+    task_menu = ctk.CTkOptionMenu(
+        bar, values=_LIVE_TASK_OPTIONS, variable=_live_video_task_var,
+        font=FONT, height=24,
+    )
+    task_menu.place(relx=0.06, rely=0.56, relwidth=0.14, relheight=0.34)
+    Tooltip(
+        task_menu,
+        "Task type for the YOLO model.\n"
+        "'Auto-detect' works for .pt files but will fail for exported\n"
+        "formats like TensorRT (.engine) or ONNX (.onnx) that do not\n"
+        "embed task metadata.  Select the correct task explicitly\n"
+        "(e.g. 'detect' for detection, 'segment' for segmentation).",
+    )
+
     ctk.CTkLabel(bar, text="Seek:", font=FONT, text_color="gray").place(
         relx=0.51, rely=0.56, relwidth=0.04, relheight=0.30
     )
@@ -2112,8 +2132,19 @@ def _live_video_thread() -> None:
         from ultralytics import YOLO as _YOLO
 
         device = _get_device()
-        model = _YOLO(detection_model_path)
-        model.to(device)
+        raw_task = _live_video_task_var.get() if _live_video_task_var else "Auto-detect"
+        task = None if raw_task == "Auto-detect" else raw_task
+        model = _YOLO(detection_model_path, task=task)
+        try:
+            model.to(device)
+        except (RuntimeError, AttributeError):
+            # TensorRT (.engine) models are compiled for a specific device and
+            # do not support being moved; the device is passed per-predict call.
+            import logging
+            logging.getLogger(__name__).debug(
+                "model.to(device) skipped for %s (device-specific compiled model).",
+                detection_model_path,
+            )
 
         cap = cv2.VideoCapture(_live_video_path)
         if not cap.isOpened():
