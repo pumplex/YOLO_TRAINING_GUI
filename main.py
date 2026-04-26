@@ -2426,7 +2426,7 @@ def _live_video_thread() -> None:
                         # Extraction can take seconds; using a pre-captured frame
                         # index would place audio far behind the video.
                         cur_frame = _live_video_frame_ref[0]
-                        fps_ref   = _live_video_fps_ref[0]
+                        fps_ref = _live_video_fps_ref[0]
                         start_pos_adj = _audio_video_time_to_track_pos(cur_frame / fps_ref, sp)
                         if bio is not None:
                             _live_audio_bytes_io = bio
