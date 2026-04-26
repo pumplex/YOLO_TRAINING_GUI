@@ -242,6 +242,7 @@ def detect_images(
     model_path,
     callback=None,
     progress_callback: Optional[Callable] = None,
+    image_result_callback: Optional[Callable] = None,
     conf_threshold: float = 0.5,
     half: bool = False,
     workers: int = 4,
@@ -254,6 +255,9 @@ def detect_images(
     ----------
     progress_callback(current: int, total: int, msg: str)
         Called after each image or video with the running count.
+    image_result_callback(image_path: str)
+        Called after each image is processed and saved, with the path of the
+        result image so the GUI can display it incrementally.
     cancel_flag()
         Callable that returns True when the user wants to abort.
     task
@@ -290,6 +294,23 @@ def detect_images(
         latest_run_dir = _find_latest_predict_run()
         if latest_run_dir:
             move_detection_results(latest_run_dir, results_dir)
+        # Notify caller about the newly saved result image so the GUI can
+        # display it immediately rather than waiting for all images to finish.
+        if image_result_callback:
+            # Fast path: YOLO normally preserves the original filename.
+            result_candidate = results_dir / img_path.name
+            if not (result_candidate.is_file() and is_valid_image(result_candidate)):
+                # Fallback: scan for any file whose stem matches (handles
+                # cases where YOLO converts the extension, e.g. PNG → JPEG).
+                result_candidate = None
+                for result_file in results_dir.iterdir():
+                    if (result_file.is_file()
+                            and result_file.stem == img_path.stem
+                            and is_valid_image(result_file)):
+                        result_candidate = result_file
+                        break
+            if result_candidate:
+                image_result_callback(str(result_candidate))
         current += 1
 
     # Process videos

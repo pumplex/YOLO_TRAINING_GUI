@@ -1,5 +1,9 @@
 # 🚀 YOLO Training & Detection Studio
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e2a80191-b466-410e-997e-e390594bc786" alt="YOLO Studio Logo" width="120">
+</p>
+
 > A sleek, modern desktop GUI for training, evaluating, and deploying YOLO object-detection and segmentation models — no command line required.
 
 ![YOLO Studio screenshot](https://github.com/SpreadKnowledge/YOLO_train_detection_GUI/assets/56751392/5ff31879-8756-4561-ad5e-a5f6b0529798)
