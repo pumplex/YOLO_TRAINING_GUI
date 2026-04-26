@@ -1,7 +1,6 @@
 # version 2.0.0 – benchmark tab, Roboflow ZIP import, segmentation models,
 #                  custom model loader, TensorRT export, tooltips
 
-import io
 import os
 import sys
 import re
@@ -109,232 +108,196 @@ def _get_device() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Audio helpers  (Live Video tab)
+#  PCM audio helpers  (Live Video tab – sounddevice / numpy streaming)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Named constants for audio extraction and sync
-_AUDIO_EXTRACTION_TIMEOUT_SECS = 120   # max seconds to wait for ffmpeg
-_MIN_AUDIO_FILE_SIZE_BYTES      = 100   # sanity check: file must be non-trivial
-_AUDIO_SYNC_CHECK_INTERVAL      = 15    # frames between sync checks (less frequent = fewer stutters)
-_AUDIO_SYNC_THRESHOLD_SECS      = 1.5   # seconds of drift before hard-resyncing
-_AUDIO_CALIB_FRAMES             = 40    # frames to sample before speed-matching audio
-_MIN_AUDIO_SPEED_RATIO          = 0.1   # guard against invalid/degenerate speed values
+# Named constants
+_AUDIO_EXTRACTION_TIMEOUT_SECS = 120   # max seconds to wait for ffmpeg extraction
+_PCM_SAMPLE_RATE       = 44100         # output sample rate (Hz)
+_PCM_CHANNELS          = 2             # stereo output
+_PCM_BLOCK_SIZE        = 2048          # frames per sounddevice callback
+_PCM_BYTES_PER_SAMPLE  = 2             # int16 → 2 bytes per sample
+
+# PCM streaming state (shared between video thread and audio callback thread)
+_pcm_data         = None   # np.ndarray shape (N, _PCM_CHANNELS) float32
+_pcm_pos          = [0]    # current read position in _pcm_data (samples)
+_pcm_seek_to      = [-1]   # pending seek target (samples); -1 = none
+_pcm_stream       = None   # sounddevice.OutputStream instance
+_pcm_speed        = [1.0]  # current playback speed ratio (updated per video frame)
+_pcm_volume       = [1.0]  # current volume (0.0 – 1.0+)
+_pcm_paused       = [False]  # True while video is paused
 
 
-def _atempo_filter_chain(speed: float) -> list:
-    """Return a list of atempo values that chain-multiply to *speed*.
+def _pcm_extract(video_path: str):
+    """Extract raw PCM audio from *video_path* via ffmpeg.
 
-    Each atempo value must be in [0.5, 2.0] (ffmpeg constraint).
-    The product of all returned values equals *speed*.
-    *speed* must be positive; values <= 0 are clamped to a minimum of 0.1.
-    """
-    speed = max(0.1, speed)  # guard against zero or negative values
-    filters = []
-    # Handle values below 1.0 by chaining 0.5 multipliers
-    while speed < 0.5:
-        filters.append(0.5)
-        speed /= 0.5
-    # Handle values above 2.0 by chaining 2.0 multipliers
-    while speed > 2.0:
-        filters.append(2.0)
-        speed /= 2.0
-    filters.append(round(speed, 4))
-    return filters
-
-
-def _audio_extract(video_path: str, speed: float = 1.0):
-    """Extract audio track from *video_path* via ffmpeg.
-
-    When *speed* differs from 1.0 the audio is time-stretched using ffmpeg's
-    atempo filter so that playback duration matches the video's actual display
-    speed.  speed=0.5 means the video plays at half the original framerate, so
-    the audio must also be slowed to match.
-
-    When the user has enabled RAM mode the audio data is returned as an
-    ``io.BytesIO`` object.  Otherwise the data is written to a file inside
-    the app's ``temp/`` folder.
+    Audio is decoded to interleaved signed-16-bit little-endian PCM at
+    *_PCM_SAMPLE_RATE* Hz with *_PCM_CHANNELS* channels, then normalised to a
+    float32 numpy array in the range [-1, 1].
 
     Returns
     -------
-    (file_path, bytes_io)
-        Exactly one of the two values will be non-None depending on the mode.
-        Both are None on failure.
-    """
-    use_ram = (_get_temp_dir() is None)
-
-    # Build the audio filter argument (atempo chain if speed != 1.0)
-    atempo_vals = _atempo_filter_chain(speed)
-    if len(atempo_vals) == 1 and abs(atempo_vals[0] - 1.0) < 0.01:
-        af_args = []  # no filter needed
-    else:
-        af_str = ",".join(f"atempo={v}" for v in atempo_vals)
-        af_args = ["-filter:a", af_str]
-
-    if use_ram:
-        # Extract directly to stdout pipe – no disk I/O
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", video_path,
-                    "-vn", "-acodec", "libmp3lame", "-q:a", "4",
-                ] + af_args + [
-                    "-f", "mp3", "pipe:1",
-                ],
-                capture_output=True,
-                timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
-            )
-            if result.returncode == 0 and len(result.stdout) > _MIN_AUDIO_FILE_SIZE_BYTES:
-                return None, io.BytesIO(result.stdout)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-        return None, None
-    else:
-        # Extract to a file in the temp/ directory
-        import tempfile
-        temp_dir = _get_temp_dir()
-        temp_dir.mkdir(exist_ok=True)
-        tmp_fd, temp = tempfile.mkstemp(suffix=".mp3", prefix="yolo_studio_audio_",
-                                        dir=str(temp_dir))
-        os.close(tmp_fd)
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", video_path,
-                    "-vn", "-acodec", "libmp3lame", "-q:a", "4",
-                ] + af_args + [temp],
-                capture_output=True,
-                timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
-            )
-            if (
-                result.returncode == 0
-                and os.path.exists(temp)
-                and os.path.getsize(temp) > _MIN_AUDIO_FILE_SIZE_BYTES
-            ):
-                return temp, None
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-        try:
-            if os.path.exists(temp):
-                os.unlink(temp)
-        except Exception:
-            pass
-        return None, None
-
-
-def _audio_play(audio_source, start_pos: float = 0.0, volume: float = 1.0) -> bool:
-    """Start pygame audio playback from *start_pos* seconds.
-
-    *audio_source* may be a file-path string or an ``io.BytesIO`` object.
-    Returns True on success.
+    np.ndarray of shape (N, _PCM_CHANNELS) and dtype float32, or None on
+    failure (no audio track, ffmpeg missing, etc.).
     """
     try:
-        import pygame
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        if isinstance(audio_source, io.BytesIO):
-            audio_source.seek(0)
-            pygame.mixer.music.load(audio_source, namehint="audio.mp3")
-        else:
-            pygame.mixer.music.load(audio_source)
-        pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
-        pygame.mixer.music.play(start=start_pos)
+        import numpy as np
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ar", str(_PCM_SAMPLE_RATE),
+                "-ac", str(_PCM_CHANNELS),
+                "-f", "s16le", "pipe:1",
+            ],
+            capture_output=True,
+            timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
+        )
+        if result.returncode == 0 and len(result.stdout) >= _PCM_CHANNELS * _PCM_BYTES_PER_SAMPLE:
+            raw = np.frombuffer(result.stdout, dtype=np.int16)
+            # Discard any trailing incomplete frame
+            n_complete = (len(raw) // _PCM_CHANNELS) * _PCM_CHANNELS
+            raw = raw[:n_complete]
+            data = raw.reshape(-1, _PCM_CHANNELS).astype(np.float32) / 32768.0
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def _pcm_audio_callback(outdata, frames, time_info, status):
+    """sounddevice OutputStream callback.
+
+    Reads *frames* × speed source samples from *_pcm_data*, resamples them to
+    exactly *frames* output samples using linear interpolation, and writes the
+    result to *outdata*.  Speed changes take effect immediately each callback
+    without any re-extraction or re-encoding step.
+    """
+    import numpy as np
+
+    # Apply any pending seek requested from the video thread
+    seek = _pcm_seek_to[0]
+    if seek >= 0:
+        _pcm_pos[0] = seek
+        _pcm_seek_to[0] = -1
+
+    if _pcm_paused[0] or _pcm_data is None:
+        outdata[:] = 0
+        return
+
+    speed  = max(0.05, float(_pcm_speed[0]))
+    volume = max(0.0,  min(2.0, float(_pcm_volume[0])))
+    pos    = _pcm_pos[0]
+    total  = len(_pcm_data)
+
+    if pos >= total:
+        outdata[:] = 0
+        return
+
+    # How many source samples correspond to *frames* output samples at this speed
+    n_consume = max(1, round(frames * speed))
+    end       = min(pos + n_consume, total)
+    n_actual  = end - pos
+
+    chunk = _pcm_data[pos:end]  # shape (n_actual, _PCM_CHANNELS)
+
+    if n_actual == frames:
+        # Speed is essentially 1.0 – no interpolation needed
+        out = chunk.copy()
+    else:
+        # Resample n_actual source samples → frames output samples via linear
+        # interpolation independently on each channel.
+        x_src = np.arange(n_actual, dtype=np.float32)
+        x_out = np.linspace(0.0, float(n_actual - 1), frames, dtype=np.float32)
+        n_ch  = chunk.shape[1]
+        out   = np.empty((frames, n_ch), dtype=np.float32)
+        for ch in range(n_ch):
+            out[:, ch] = np.interp(x_out, x_src, chunk[:, ch])
+
+    out *= volume
+    np.clip(out, -1.0, 1.0, out=out)
+
+    # sounddevice may give us a different channel count than the source
+    if outdata.shape[1] <= out.shape[1]:
+        outdata[:] = out[:, :outdata.shape[1]]
+    else:
+        outdata[:, :out.shape[1]] = out
+        outdata[:, out.shape[1]:] = 0
+
+    _pcm_pos[0] = end
+
+
+def _pcm_start_stream(pcm_data, start_pos_secs: float = 0.0, volume: float = 1.0) -> bool:
+    """Begin PCM streaming from *start_pos_secs* in the source audio.
+
+    Stores *pcm_data* in the module-level globals, creates and starts a
+    sounddevice OutputStream, and returns True on success.
+    """
+    global _pcm_data, _pcm_stream
+    try:
+        import sounddevice as sd
+        import numpy as np
+
+        _pcm_stop_stream()
+
+        _pcm_data       = pcm_data
+        _pcm_pos[0]     = max(0, int(start_pos_secs * _PCM_SAMPLE_RATE))
+        _pcm_seek_to[0] = -1
+        _pcm_paused[0]  = False
+        _pcm_volume[0]  = volume
+
+        _pcm_stream = sd.OutputStream(
+            samplerate=_PCM_SAMPLE_RATE,
+            channels=_PCM_CHANNELS,
+            dtype="float32",
+            blocksize=_PCM_BLOCK_SIZE,
+            callback=_pcm_audio_callback,
+        )
+        _pcm_stream.start()
         return True
     except Exception:
         return False
 
 
-def _audio_pause() -> None:
-    try:
-        import pygame
-        if pygame.mixer.get_init():
-            pygame.mixer.music.pause()
-    except Exception:
-        pass
-
-
-def _audio_unpause() -> None:
-    try:
-        import pygame
-        if pygame.mixer.get_init():
-            pygame.mixer.music.unpause()
-    except Exception:
-        pass
-
-
-def _audio_stop() -> None:
-    try:
-        import pygame
-        if pygame.mixer.get_init():
-            pygame.mixer.music.stop()
-    except Exception:
-        pass
-
-
-def _audio_set_pos(pos_seconds: float) -> None:
-    """Seek audio playback to *pos_seconds*. Works reliably for MP3 files."""
-    try:
-        import pygame
-        if pygame.mixer.get_init():
-            pygame.mixer.music.set_pos(pos_seconds)
-    except Exception:
-        pass
-
-
-def _audio_set_volume(volume: float) -> None:
-    """Set pygame music volume (0.0 – 1.0)."""
-    try:
-        import pygame
-        if pygame.mixer.get_init():
-            pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
-    except Exception:
-        pass
-
-
-def _get_current_audio_speed_ratio(speed_ratio: float | None = None) -> float:
-    """Return a validated audio speed ratio."""
-    if speed_ratio is not None:
+def _pcm_stop_stream() -> None:
+    """Stop and close the active sounddevice stream (if any)."""
+    global _pcm_stream
+    if _pcm_stream is not None:
         try:
-            return max(_MIN_AUDIO_SPEED_RATIO, float(speed_ratio))
-        except (TypeError, ValueError):
-            return 1.0
-    try:
-        speed_ratio = float(_live_audio_speed_ratio[0]) if _live_audio_speed_ratio else 1.0
-    except (TypeError, ValueError, IndexError):
-        speed_ratio = 1.0
-    return max(_MIN_AUDIO_SPEED_RATIO, speed_ratio)
+            _pcm_stream.stop()
+            _pcm_stream.close()
+        except Exception:
+            pass
+        _pcm_stream = None
 
 
-def _audio_video_time_to_track_pos(video_seconds: float, speed_ratio: float | None = None) -> float:
-    """Convert original video time to the adjusted audio-track timeline.
+def _pcm_seek(pos_secs: float) -> None:
+    """Schedule a seek to *pos_secs* in the original audio timeline.
 
-    This maps a point on the original video timeline to the equivalent position
-    inside the speed-adjusted audio track. Faster playback (> 1.0) returns a
-    smaller track position; slower playback (< 1.0) returns a larger one.
+    The seek is applied on the next callback invocation so it is safe to call
+    from any thread without holding a lock.
     """
-    return max(0.0, video_seconds / _get_current_audio_speed_ratio(speed_ratio))
+    _pcm_seek_to[0] = max(0, int(pos_secs * _PCM_SAMPLE_RATE))
 
 
-def _audio_track_elapsed_to_video_time(track_seconds: float) -> float:
-    """Convert elapsed adjusted-track time back to the original video timeline."""
-    return max(0.0, track_seconds * _get_current_audio_speed_ratio())
+def _pcm_set_volume(volume: float) -> None:
+    """Update the playback volume (0.0 – 1.0).  Thread-safe."""
+    _pcm_volume[0] = max(0.0, min(1.0, float(volume)))
 
 
 def _cleanup_live_audio() -> None:
-    """Stop audio and free any temporary audio resources."""
-    global _live_audio_temp_file, _live_audio_bytes_io
-    _audio_stop()
-    if _live_audio_temp_file and os.path.exists(_live_audio_temp_file):
-        try:
-            os.unlink(_live_audio_temp_file)
-        except Exception:
-            pass
-    _live_audio_temp_file = None
-    _live_audio_bytes_io = None
-    _live_audio_speed_ratio[0] = 1.0
+    """Stop PCM streaming and release audio resources."""
+    global _pcm_data
+    _pcm_stop_stream()
+    _pcm_data        = None
+    _pcm_pos[0]      = 0
+    _pcm_seek_to[0]  = -1
+    _pcm_speed[0]    = 1.0
+    _pcm_volume[0]   = 1.0
+    _pcm_paused[0]   = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,12 +642,8 @@ _live_video_task_var      = None    # StringVar  – model task override (for Te
 
 # Live-video audio state
 _live_audio_enabled_var   = None    # BooleanVar – enable audio playback
-_live_audio_sync_var      = None    # BooleanVar – sync audio to video (skip-based)
+_live_audio_sync_var      = None    # BooleanVar – sync audio speed to video FPS
 _live_audio_volume_var    = None    # DoubleVar  – playback volume (0.0–1.0)
-_live_audio_temp_file     = None    # path to extracted temp MP3 file (disk mode)
-_live_audio_bytes_io      = None    # io.BytesIO audio data (RAM mode)
-_live_audio_wall_start    = [0.0]   # wall-clock time when adjusted audio track pos = 0
-_live_audio_speed_ratio   = [1.0]   # speed multiplier applied to the extracted audio track
 _live_video_is_url        = [False] # True when source is a URL/stream
 
 # Sidebar settings state (set once when sidebar is built)
@@ -1859,10 +1818,12 @@ def show_live_video_window() -> None:
     sync_chk.place(relx=0.49, rely=0.56, relwidth=0.065, relheight=0.38)
     Tooltip(
         sync_chk,
-        "Match audio playback speed to the actual video FPS.\n"
-        f"After a short calibration phase ({_AUDIO_CALIB_FRAMES} frames) the audio\n"
-        "is re-extracted at the correct speed so that audio and video\n"
-        "stay in sync without stutters.",
+        "Continuously adjust audio playback speed to match the actual\n"
+        "video frame rate (which may be slower than real-time when YOLO\n"
+        "inference is heavy).  Audio slows down smoothly — no pauses or\n"
+        "jarring cuts.  Accumulated drift is closed within ~2 frames.\n"
+        "Re-enabling Sync seeks audio to the current frame position.\n"
+        "Disable to let audio free-run at 1.0× speed.",
     )
 
     # ── Volume control (placed to the right of the +10s seek button) ──────
@@ -1880,7 +1841,7 @@ def show_live_video_window() -> None:
     def _on_volume_change(*_):
         v = _live_audio_volume_var.get()
         vol_val_lbl.configure(text=f"{int(v * 100)}%")
-        _audio_set_volume(v)
+        _pcm_set_volume(v)
 
     _live_audio_volume_var.trace_add("write", _on_volume_change)
     Tooltip(vol_slider, "Audio playback volume (0 – 100%).")
@@ -1991,11 +1952,11 @@ def show_live_video_window() -> None:
                 text="▶ Resume" if _live_video_paused else "⏸ Pause",
                 fg_color="#e65100" if _live_video_paused else "#37474f",
             )
-        # Pause / unpause audio in sync
+        # Pause / unpause audio in sync – set the flag that the callback reads
         if _live_video_paused:
-            _audio_pause()
+            _pcm_paused[0] = True
         else:
-            _audio_unpause()
+            _pcm_paused[0] = False
 
     _live_video_pause_btn = ctk.CTkButton(
         bar, text="⏸ Pause", command=_toggle_pause,
@@ -2117,7 +2078,6 @@ def show_live_video_window() -> None:
 
 def _start_live_video() -> None:
     global _live_video_running, _live_video_cancel_flag, _live_video_paused
-    global _live_audio_temp_file, _live_audio_bytes_io
 
     if not _live_video_path:
         messagebox.showerror("Error", "Please select a video file first.")
@@ -2155,39 +2115,14 @@ def _start_live_video() -> None:
         audio_want = False
 
     if audio_want:
-        audio_sync_now = _live_audio_sync_var is not None and _live_audio_sync_var.get()
-        if not audio_sync_now:
-            # Sync disabled – extract at 1.0× and play immediately (no speed matching).
-            _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
-            vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-
-            def _extract_and_play():
-                global _live_audio_temp_file, _live_audio_bytes_io
-                file_path, bio = _audio_extract(_live_video_path)
-                if bio is not None:
-                    _live_audio_bytes_io = bio
-                    _live_audio_speed_ratio[0] = 1.0
-                    _live_audio_wall_start[0] = time.time()
-                    _audio_play(bio, start_pos=0.0, volume=vol)
-                elif file_path is not None:
-                    _live_audio_temp_file = file_path
-                    _live_audio_speed_ratio[0] = 1.0
-                    _live_audio_wall_start[0] = time.time()
-                    _audio_play(file_path, start_pos=0.0, volume=vol)
-                else:
-                    root.after(0, lambda: messagebox.showinfo(
-                        "Audio Unavailable",
-                        "Could not extract audio.\n\n"
-                        "Make sure ffmpeg is installed and available on your system PATH:\n"
-                        "  Windows: https://ffmpeg.org/download.html\n"
-                        "  macOS:   brew install ffmpeg\n"
-                        "  Linux:   sudo apt install ffmpeg\n\n"
-                        "Video will play without audio.",
-                    ))
-            threading.Thread(target=_extract_and_play, daemon=True).start()
-        # else: sync is ON – the frame thread calibration will measure actual fps,
-        # then extract audio at the correct speed and start playback at the right
-        # position.  Do not start audio here to avoid playing at the wrong speed.
+        # Delegate audio extraction entirely to the video thread's first-frame
+        # handler so there is only one code path.  Just show the extracting
+        # label here so the user gets immediate visual feedback.
+        _safe_label_configure(
+            _live_video_status_label,
+            text="⏳ Extracting audio…",
+            text_color="#64b5f6",
+        )
 
     threading.Thread(target=_live_video_thread, daemon=True).start()
 
@@ -2217,17 +2152,23 @@ def _live_video_thread() -> None:
 
     Audio sync strategy
     -------------------
-    1. During the first _AUDIO_CALIB_FRAMES frames we measure the actual
-       per-frame processing time (inference + display).
-    2. Once calibration is complete we compute the speed ratio
-       (actual fps / original fps).  If the ratio differs from 1.0 by more
-       than 5 % we re-extract the audio with ffmpeg's atempo filter so the
-       audio duration stretches to match the slower (or faster) playback.
-    3. The re-extracted audio is then played from the current video position,
-       giving smooth sync without any seek jumps or stutters.
-    4. A background hard-resync (seek) is still applied as a safety net but
-       only fires when drift exceeds _AUDIO_SYNC_THRESHOLD_SECS (1.5 s by
-       default), which is rare after speed-matching.
+    Raw PCM audio is extracted from the video file once (via ffmpeg) and
+    streamed through a sounddevice OutputStream.  The sounddevice callback
+    reads ``frames * speed`` source samples per call and resamples them to
+    ``frames`` output samples using linear interpolation.  This means speed
+    changes take effect within one callback block (~46 ms at 44 100 Hz /
+    2 048 frames) without any re-extraction, seek jump, or stutter.
+
+    When the "Sync" checkbox is enabled, the video thread computes a speed EMA
+    (alpha = 0.40, converges in ~4 frames) of the ratio
+    ``frame_delay / actual_frame_time``.  This is the exact fraction by which
+    the video is slower than real-time.  A proportional drift correction
+    (``drift_secs / (2 × frame_time)``) is applied on top to close any
+    accumulated audio–video position error within roughly two frames.  When Sync
+    is re-enabled after being disabled, the audio head is seeked to the current
+    video frame position so any drift that built up while sync was off is cleared
+    instantly.  ``_pcm_paused`` is managed solely by ``_toggle_pause``; the sync
+    path never touches it, so pause/resume works correctly at any point.
     """
     try:
         from ultralytics import YOLO as _YOLO
@@ -2262,11 +2203,9 @@ def _live_video_thread() -> None:
 
         frame_delay = max(0.001, 1.0 / fps)
         frame_idx = 0
-        _audio_was_on = False  # track whether audio was playing last iteration
-
-        # Calibration state for speed-matched audio
-        _calib_times: list = []            # per-frame wall-clock durations
-        _audio_speed_calibrated = False    # whether we have re-extracted audio
+        _audio_was_on = False       # track whether audio was active last iteration
+        _audio_sync_was_on = False  # track previous value of audio_sync for edge detection
+        _ema_speed = 1.0            # EMA of (frame_delay / actual_frame_time); init real-time
 
         while not _live_video_cancel_flag[0]:
             # ── Read per-frame controls (take effect immediately) ──────────
@@ -2279,43 +2218,53 @@ def _live_video_thread() -> None:
             )
             audio_sync = _live_audio_sync_var is not None and _live_audio_sync_var.get()
 
-            # ── Handle audio on/off toggled while running ──────────────────
-            audio_source = _live_audio_temp_file or _live_audio_bytes_io
-            if audio_want and not _audio_was_on and audio_source is None:
+            # ── Handle audio enabled/disabled while running ────────────────
+            stream_active = _pcm_stream is not None
+            if audio_want and not _audio_was_on and not stream_active:
+                # Audio was just turned on (or was requested at startup).
+                # Start extraction in a background thread – this is the ONLY
+                # place extraction is triggered so there is no race condition.
                 _audio_was_on = True
-                _audio_speed_calibrated = False  # allow recalibration on re-enable
-                _calib_times.clear()
-                if not audio_sync:
-                    # Sync disabled – extract at 1.0× and start immediately.
-                    # Use the live frame position *after* extraction completes so
-                    # we don't seek to a stale position (extraction takes time).
-                    vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-                    _vid_path = _live_video_path
+                vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+                _vid_path = _live_video_path
+                root.after(0, lambda: _safe_label_configure(
+                    _live_video_status_label,
+                    text="⏳ Extracting audio…",
+                    text_color="#64b5f6",
+                ))
 
-                    def _late_extract(video_path=_vid_path, volume=vol):
-                        global _live_audio_temp_file, _live_audio_bytes_io
-                        file_path, bio = _audio_extract(video_path)
-                        # Read live frame position after extraction finishes
-                        start = _live_video_frame_ref[0] / _live_video_fps_ref[0]
-                        if bio is not None:
-                            _live_audio_bytes_io = bio
-                            _live_audio_speed_ratio[0] = 1.0
-                            _live_audio_wall_start[0] = time.time() - start
-                            _audio_play(bio, start_pos=start, volume=volume)
-                        elif file_path is not None:
-                            _live_audio_temp_file = file_path
-                            _live_audio_speed_ratio[0] = 1.0
-                            _live_audio_wall_start[0] = time.time() - start
-                            _audio_play(file_path, start_pos=start, volume=volume)
+                def _late_stream(video_path=_vid_path, volume=vol):
+                    pcm = _pcm_extract(video_path)
+                    if pcm is None:
+                        root.after(0, lambda: messagebox.showinfo(
+                            "Audio Unavailable",
+                            "Could not extract audio from the video file.\n\n"
+                            "Make sure ffmpeg is installed and on your system PATH:\n"
+                            "  Windows: https://ffmpeg.org/download.html\n"
+                            "  macOS:   brew install ffmpeg\n"
+                            "  Linux:   sudo apt install ffmpeg\n\n"
+                            "Video will continue without audio.",
+                        ))
+                        return
+                    start = _live_video_frame_ref[0] / max(_live_video_fps_ref[0], 1.0)
+                    ok = _pcm_start_stream(pcm, start_pos_secs=start, volume=volume)
+                    if not ok:
+                        root.after(0, lambda: messagebox.showinfo(
+                            "Audio Unavailable",
+                            "Could not open an audio output stream.\n\n"
+                            "Please ensure the following packages are installed:\n"
+                            "  pip install sounddevice numpy\n\n"
+                            "On Linux/macOS you also need PortAudio:\n"
+                            "  Linux:  sudo apt install libportaudio2\n"
+                            "  macOS:  brew install portaudio\n\n"
+                            "Video will continue without audio.",
+                        ))
 
-                    threading.Thread(target=_late_extract, daemon=True).start()
-                # else: sync is ON – calibration block will extract at measured speed
+                threading.Thread(target=_late_stream, daemon=True).start()
             elif not audio_want and _audio_was_on:
-                # User just disabled audio
                 _cleanup_live_audio()
+                _pcm_speed[0] = 1.0
                 _audio_was_on = False
-                _audio_speed_calibrated = False
-                _calib_times.clear()
             elif audio_want:
                 _audio_was_on = True
 
@@ -2325,13 +2274,9 @@ def _live_video_thread() -> None:
                 frame_idx = max(0, min(seek_target, total_frames - 1))
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 _live_video_seek_to[0] = -1
-                # Seek audio to match video position
-                _audio_src = _live_audio_temp_file or _live_audio_bytes_io
-                if _audio_src:
-                    video_pos = frame_idx / fps
-                    track_pos = _audio_video_time_to_track_pos(video_pos)
-                    _audio_set_pos(track_pos)
-                    _live_audio_wall_start[0] = time.time() - track_pos
+                # Seek PCM audio to the corresponding position
+                if _pcm_stream is not None:
+                    _pcm_seek(frame_idx / fps)
 
             # ── Pause ─────────────────────────────────────────────────────
             if _live_video_paused:
@@ -2362,101 +2307,40 @@ def _live_video_thread() -> None:
             # ── Measure actual elapsed time for this frame ─────────────────
             t_after_predict = time.perf_counter()
             frame_proc_time = t_after_predict - t_start
-            actual_fps = 1.0 / max(frame_proc_time, 0.001)
+            # Total display time = max of inference time and fps throttle delay
+            total_frame_time = max(frame_proc_time, frame_delay)
+            actual_fps = 1.0 / max(frame_proc_time, 0.001)  # shown in status bar
 
-            # ── Calibration: collect timing samples ───────────────────────
-            # Collect from the current position whenever calibration is active
-            # (not fixed to frames 0-N) so re-enabled audio also calibrates.
-            if (
-                not _audio_speed_calibrated
-                and audio_want
-                and audio_sync
-                and len(_calib_times) < _AUDIO_CALIB_FRAMES
-            ):
-                _calib_times.append(frame_proc_time)
+            # ── Smooth audio speed to match actual video throughput ────────
+            # EMA of the speed ratio (alpha=0.4 → converges in ~4 frames).
+            # raw_speed is the exact ratio needed for audio to advance at the
+            # same rate as the video; < 1.0 when inference is slower than
+            # real-time.
+            raw_speed = frame_delay / max(total_frame_time, 1e-6)
+            _ema_speed = 0.6 * _ema_speed + 0.4 * raw_speed
 
-            # ── After calibration: extract audio at correct speed ─────────
-            if (
-                not _audio_speed_calibrated
-                and len(_calib_times) >= _AUDIO_CALIB_FRAMES
-                and audio_want
-                and audio_sync
-            ):
-                avg_proc = sum(_calib_times) / len(_calib_times)
-                # Total display time per frame accounts for both slow inference
-                # and the fps-throttle sleep; whichever is the bottleneck.
-                avg_display_time = max(avg_proc, frame_delay)
-                measured_fps = 1.0 / avg_display_time
-                speed_ratio = measured_fps / fps   # <1 when inference is slower
+            if audio_want and _pcm_stream is not None:
+                if audio_sync:
+                    # If Sync was just re-enabled, seek audio to the current
+                    # frame position so any drift accumulated while sync was
+                    # off is wiped immediately.
+                    if not _audio_sync_was_on:
+                        _pcm_seek(frame_idx / fps)
 
-                _audio_speed_calibrated = True     # only calibrate once per play session
+                    # Drift correction: close any remaining positional error
+                    # within ~2 frames by adjusting speed proportionally.
+                    # Using actual frame time in the denominator makes the
+                    # correction self-scaling across fast and slow hardware.
+                    expected_sample = int(frame_idx / fps * _PCM_SAMPLE_RATE)
+                    drift_secs = (_pcm_pos[0] - expected_sample) / _PCM_SAMPLE_RATE
+                    correction = drift_secs / max(2.0 * total_frame_time, 1e-6)
 
-                _audio_src = _live_audio_temp_file or _live_audio_bytes_io
-                audio_already_playing = _audio_src is not None
-                # Re-extract if audio isn't playing yet (sync mode delayed start)
-                # or if the measured speed differs from the current track speed by
-                # more than 5 %.
-                needs_extraction = (
-                    not audio_already_playing
-                    or abs(1.0 - speed_ratio) > 0.05
-                )
+                    _pcm_speed[0] = max(0.05, min(2.0, _ema_speed - correction))
+                else:
+                    # Sync off: free-run at 1.0×
+                    _pcm_speed[0] = 1.0
 
-                if needs_extraction:
-                    _vid_path = _live_video_path
-                    _vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-                    # Clamp to a practical range: 0.1 (extreme slow-motion GPU)
-                    # to 10.0 (theoretical super-fast hardware).
-                    _speed = max(0.1, min(10.0, speed_ratio))
-
-                    def _respeed(video_path=_vid_path, sp=_speed, vol=_vol):
-                        global _live_audio_temp_file, _live_audio_bytes_io
-                        _audio_stop()
-                        # Clean up old temp file before creating new one
-                        old_tmp = _live_audio_temp_file
-                        _live_audio_temp_file = None
-                        _live_audio_bytes_io = None
-                        if old_tmp:
-                            try:
-                                os.unlink(old_tmp)
-                            except Exception:
-                                pass
-
-                        file_path, bio = _audio_extract(video_path, speed=sp)
-                        # Read the LIVE frame position AFTER extraction finishes.
-                        # Extraction can take seconds; using a pre-captured frame
-                        # index would place audio far behind the video.
-                        cur_frame = _live_video_frame_ref[0]
-                        fps_ref = _live_video_fps_ref[0]
-                        start_pos_adj = _audio_video_time_to_track_pos(cur_frame / fps_ref, sp)
-                        if bio is not None:
-                            _live_audio_bytes_io = bio
-                            _live_audio_speed_ratio[0] = sp
-                            _live_audio_wall_start[0] = time.time() - start_pos_adj
-                            _audio_play(bio, start_pos=start_pos_adj, volume=vol)
-                        elif file_path is not None:
-                            _live_audio_temp_file = file_path
-                            _live_audio_speed_ratio[0] = sp
-                            _live_audio_wall_start[0] = time.time() - start_pos_adj
-                            _audio_play(file_path, start_pos=start_pos_adj, volume=vol)
-
-                    threading.Thread(target=_respeed, daemon=True).start()
-
-            # ── Periodic hard-resync (safety net for residual drift) ───────
-            _audio_src = _live_audio_temp_file or _live_audio_bytes_io
-            if (
-                audio_sync
-                and _audio_src
-                and _audio_speed_calibrated
-                and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0
-                and frame_idx > _AUDIO_CALIB_FRAMES
-            ):
-                video_time = frame_idx / fps
-                elapsed_track = time.time() - _live_audio_wall_start[0]
-                drift = video_time - _audio_track_elapsed_to_video_time(elapsed_track)
-                if abs(drift) > _AUDIO_SYNC_THRESHOLD_SECS:
-                    track_pos = _audio_video_time_to_track_pos(video_time)
-                    _audio_set_pos(track_pos)
-                    _live_audio_wall_start[0] = time.time() - track_pos
+            _audio_sync_was_on = audio_sync
 
             # Prepare display image
             img_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
