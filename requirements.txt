@@ -15,5 +15,9 @@ customtkinter
 Pillow
 ultralytics
 matplotlib
-pygame
 # pyyaml is installed automatically as a transitive dependency of ultralytics
+
+# ── Audio (PCM streaming with real-time speed adjustment) ──────────────────
+sounddevice   # OutputStream for raw PCM playback
+numpy         # PCM buffer arithmetic and linear interpolation
+scipy         # optional: higher-quality resampling utilities
