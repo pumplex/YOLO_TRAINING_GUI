@@ -259,15 +259,68 @@ _benchmark_model_list_frame = None
 
 output_queue = Queue()
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Persistent tab-state buffers  (survive tab switches)
+# ─────────────────────────────────────────────────────────────────────────────
+_train_log_buffer         = []     # accumulated training output lines
+_train_progress_value     = 0.0   # last progress bar fraction for train tab
+_train_progress_text      = ""    # last progress label text for train tab
+
+_detect_file_count_text   = ""    # last file-count label text
+_detect_model_info_text   = ""    # last model-info label text
+_detect_progress_value    = 0.0   # last detection progress bar fraction
+_detect_progress_text     = ""    # last detection progress label text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Embedded logo  (base64-encoded PNG, displayed in sidebar)
+# ─────────────────────────────────────────────────────────────────────────────
+_LOGO_B64 = (
+    "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"
+    "lChRooSq+AMg9whXo2gm/wAAAABJRU5ErkJggg=="
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Output-queue consumer  (runs on main thread via root.after)
 # ─────────────────────────────────────────────────────────────────────────────
 def update_output_textbox() -> None:
-    global output_textbox
+    global output_textbox, _train_log_buffer
     try:
+        line = output_queue.get_nowait()
+        _train_log_buffer.append(line)
         if output_textbox is not None and output_textbox.winfo_exists():
-            line = output_queue.get_nowait()
             output_textbox.insert("end", line)
             output_textbox.yview_moveto(1)
     except Empty:
@@ -855,15 +908,20 @@ def show_ai_train_window() -> None:
     )
     output_textbox.pack(fill="both", expand=True, padx=12, pady=(0, 4))
 
+    # Restore any training log that was produced before this tab was loaded
+    if _train_log_buffer:
+        output_textbox.insert("1.0", "".join(_train_log_buffer))
+        output_textbox.yview_moveto(1)
+
     train_progress_label = ctk.CTkLabel(
-        log_panel, text="", font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+        log_panel, text=_train_progress_text, font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
     )
     train_progress_label.pack(anchor="w", padx=12)
 
     progress_bar = ctk.CTkProgressBar(
         log_panel, progress_color="#43a047", mode="determinate",
     )
-    progress_bar.set(0)
+    progress_bar.set(_train_progress_value)
     progress_bar.pack(fill="x", padx=12, pady=(2, 10))
     # Store label reference on progress_bar object for access in callback
     progress_bar._progress_label = train_progress_label
@@ -910,13 +968,15 @@ def show_image_detection_window() -> None:
     Tooltip(sel_folder_btn, "Select a folder containing images or videos to run detection on.")
 
     detect_folder_label = ctk.CTkLabel(
-        cfg, text="No folder selected", font=("Segoe UI", 10),
-        text_color="gray", anchor="w", wraplength=220,
+        cfg, text=Path(detection_images_folder_path).name if detection_images_folder_path else "No folder selected",
+        font=("Segoe UI", 10),
+        text_color="#4caf50" if detection_images_folder_path else "gray",
+        anchor="w", wraplength=220,
     )
     detect_folder_label.pack(fill="x", padx=12)
 
     _detect_file_count_label = ctk.CTkLabel(
-        cfg, text="", font=("Segoe UI", 10), text_color="#6c7086", anchor="w",
+        cfg, text=_detect_file_count_text, font=("Segoe UI", 10), text_color="#6c7086", anchor="w",
     )
     _detect_file_count_label.pack(fill="x", padx=12)
     _csep()
@@ -931,13 +991,15 @@ def show_image_detection_window() -> None:
     Tooltip(sel_model_btn, "Choose a trained YOLO weights file for inference.\nSupports .pt, TensorRT .engine, ONNX .onnx, and other exported formats.")
 
     detect_model_label = ctk.CTkLabel(
-        cfg, text="No model selected", font=("Segoe UI", 10),
-        text_color="gray", anchor="w", wraplength=220,
+        cfg, text=Path(detection_model_path).name if detection_model_path else "No model selected",
+        font=("Segoe UI", 10),
+        text_color="#4caf50" if detection_model_path else "gray",
+        anchor="w", wraplength=220,
     )
     detect_model_label.pack(fill="x", padx=12)
 
     _detect_model_info_label = ctk.CTkLabel(
-        cfg, text="", font=("Segoe UI", 10), text_color="#6c7086",
+        cfg, text=_detect_model_info_text, font=("Segoe UI", 10), text_color="#a6adc8",
         anchor="w", wraplength=220, justify="left",
     )
     _detect_model_info_label.pack(fill="x", padx=12)
@@ -1065,15 +1127,19 @@ def show_image_detection_window() -> None:
     Tooltip(_detect_nav_bar.winfo_children()[-1], "Open the current image in a full-screen viewer.")
 
     _detect_progress_label = ctk.CTkLabel(
-        _detect_nav_bar, text="", font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
+        _detect_nav_bar, text=_detect_progress_text, font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
     )
     _detect_progress_label.place(relx=0.62, rely=0.05, relwidth=0.37, relheight=0.5)
 
     detection_progress_bar = ctk.CTkProgressBar(
         _detect_nav_bar, progress_color="#43a047", mode="determinate",
     )
-    detection_progress_bar.set(0)
+    detection_progress_bar.set(_detect_progress_value)
     detection_progress_bar.place(relx=0.62, rely=0.55, relwidth=0.37, relheight=0.35)
+
+    # Restore previously loaded result images if any exist
+    if image_paths:
+        root.after(150, update_image)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2361,6 +2427,7 @@ def clear_custom_model() -> None:
 
 def select_detection_images_folder() -> None:
     global detection_images_folder_path, detect_folder_label, image_paths, current_image_index
+    global _detect_progress_value, _detect_progress_text, _detect_file_count_text
     path = normalize_path(filedialog.askdirectory(title="Select Images/Videos Folder"))
     if not path:
         return
@@ -2385,22 +2452,28 @@ def select_detection_images_folder() -> None:
         except Exception:
             pass
     _safe_label_configure(_detect_progress_label, text="")
+    _detect_progress_value = 0.0
+    _detect_progress_text  = ""
 
     # Count files in background (can be slow for large folders)
     def _count():
+        global _detect_file_count_text
         try:
             imgs, vids = get_media_files(path)
             txt = f"{len(imgs)} image(s),  {len(vids)} video(s)"
         except Exception:
             txt = "Could not count files"
+        _detect_file_count_text = txt
         root.after(0, lambda: _safe_label_configure(_detect_file_count_label, text=txt))
 
     threading.Thread(target=_count, daemon=True).start()
+    _detect_file_count_text = "Counting files…"
     _safe_label_configure(_detect_file_count_label, text="Counting files…")
 
 
 def select_detection_model() -> None:
     global detection_model_path, detect_model_label, image_paths, current_image_index
+    global _detect_progress_value, _detect_progress_text, _detect_model_info_text
     path = normalize_path(
         filedialog.askopenfilename(
             title="Select YOLO Model",
@@ -2435,6 +2508,9 @@ def select_detection_model() -> None:
         except Exception:
             pass
     _safe_label_configure(_detect_progress_label, text="")
+    _detect_progress_value = 0.0
+    _detect_progress_text  = ""
+    _detect_model_info_text = "Loading model info…"
     _safe_label_configure(_detect_model_info_label, text="Loading model info…", text_color="#6c7086")
 
     # Load model info in background thread
@@ -2462,6 +2538,8 @@ def select_detection_model() -> None:
             auto_task = None
 
         def _apply(t=txt, at=auto_task):
+            global _detect_model_info_text
+            _detect_model_info_text = t
             _safe_label_configure(_detect_model_info_label, text=t, text_color="#a6adc8")
             if at is not None and _detect_task_var is not None:
                 _detect_task_var.set(at)
@@ -2587,17 +2665,20 @@ def _run_training_subprocess(
     epoch_re = re.compile(r'^\s*(\d+)/(\d+)\s')
 
     def _update_train_progress(current_ep: int, total_ep: int) -> None:
+        global _train_progress_value, _train_progress_text
         if progress_bar is None:
             return
         try:
             if not progress_bar.winfo_exists():
                 return
             frac = current_ep / max(total_ep, 1)
+            _train_progress_value = frac
+            _train_progress_text = f"Epoch {current_ep} / {total_ep}  ({frac * 100:.0f}%)"
             progress_bar.set(frac)
             lbl = getattr(progress_bar, "_progress_label", None)
             if lbl:
                 try:
-                    lbl.configure(text=f"Epoch {current_ep} / {total_ep}  ({frac * 100:.0f}%)")
+                    lbl.configure(text=_train_progress_text)
                 except Exception:
                     pass
         except Exception:
@@ -2639,18 +2720,22 @@ def _run_training_subprocess(
 
 
 def _training_finished() -> None:
-    global progress_bar, output_textbox
+    global progress_bar, output_textbox, _train_progress_value, _train_progress_text
+    _train_progress_value = 1.0
+    _train_progress_text = "Training complete ✅"
     if progress_bar:
         try:
             progress_bar.set(1.0)
             lbl = getattr(progress_bar, "_progress_label", None)
             if lbl:
-                lbl.configure(text="Training complete ✅")
+                lbl.configure(text=_train_progress_text)
         except Exception:
             pass
+    done_msg = "\n✅ Training process finished.\n"
+    _train_log_buffer.append(done_msg)
     try:
         if output_textbox and output_textbox.winfo_exists():
-            output_textbox.insert("end", "\n✅ Training process finished.\n")
+            output_textbox.insert("end", done_msg)
             output_textbox.yview_moveto(1)
     except Exception:
         pass
@@ -2718,6 +2803,10 @@ def _begin_image_detection() -> None:
         frac = current / max(total, 1)
         root.after(0, lambda: _update_detect_progress(frac, current, total, msg))
 
+    def _image_result_cb(result_path: str) -> None:
+        """Called by detect_images after each image is saved – display it immediately."""
+        root.after(0, lambda p=result_path: _show_single_result(p))
+
     threading.Thread(
         target=detect_images,
         kwargs=dict(
@@ -2725,6 +2814,7 @@ def _begin_image_detection() -> None:
             model_path=detection_model_path,
             callback=_on_detection_complete,
             progress_callback=_progress_cb,
+            image_result_callback=_image_result_cb,
             conf_threshold=conf,
             half=half,
             workers=workers_val,
@@ -2742,28 +2832,51 @@ def _cancel_image_detection() -> None:
 
 
 def _update_detect_progress(frac: float, current: int, total: int, msg: str) -> None:
+    global _detect_progress_value, _detect_progress_text
+    _detect_progress_value = frac
+    _detect_progress_text = f"{frac * 100:.0f}%  ({current}/{total})  {msg}"
     if detection_progress_bar:
         try:
             detection_progress_bar.set(frac)
         except Exception:
             pass
-    pct_txt = f"{frac * 100:.0f}%  ({current}/{total})  {msg}"
-    _safe_label_configure(_detect_progress_label, text=pct_txt)
+    _safe_label_configure(_detect_progress_label, text=_detect_progress_text)
     _safe_label_configure(image_index_label, text=f"{current}/{total}")
+
+
+def _show_single_result(result_path: str) -> None:
+    """Add a newly processed result image to image_paths and display it immediately."""
+    global image_paths, current_image_index
+    if result_path not in image_paths:
+        image_paths.append(result_path)
+        # Jump to the latest image so the user sees each result as it arrives
+        current_image_index = len(image_paths) - 1
+    n = len(image_paths)
+    _safe_label_configure(image_index_label, text=f"{current_image_index + 1}/{n}")
+    update_image()
 
 
 def _on_detection_complete(results_dir: str) -> None:
     global image_paths, current_image_index
-    image_paths = sorted(
+    # Rebuild the full sorted list (catches any images the per-image callback may
+    # have missed, e.g. for video frame results) and stay on the last viewed image.
+    full_list = sorted(
         str(p) for p in Path(results_dir).iterdir()
         if p.is_file() and is_valid_image(str(p))
     )
-    current_image_index = 0
+    if full_list:
+        # Keep the user's current position if images were already displayed
+        prev_index = current_image_index
+        image_paths = full_list
+        current_image_index = min(prev_index, len(image_paths) - 1)
+    else:
+        image_paths = []
+        current_image_index = 0
     root.after(0, _show_detection_results)
 
 
 def _show_detection_results() -> None:
-    global _detection_running
+    global _detection_running, _detect_progress_value, _detect_progress_text
     _detection_running = False
 
     # Restore start button
@@ -2784,19 +2897,22 @@ def _show_detection_results() -> None:
         except Exception:
             pass
 
+    _detect_progress_value = 1.0 if image_paths else 0.0
     if detection_progress_bar:
         try:
-            detection_progress_bar.set(1.0 if image_paths else 0.0)
+            detection_progress_bar.set(_detect_progress_value)
         except Exception:
             pass
 
     if image_paths:
         n = len(image_paths)
-        _safe_label_configure(_detect_progress_label, text=f"Done – {n} result image(s)")
-        _safe_label_configure(image_index_label, text=f"1/{n}")
+        _detect_progress_text = f"Done – {n} result image(s)"
+        _safe_label_configure(_detect_progress_label, text=_detect_progress_text)
+        _safe_label_configure(image_index_label, text=f"{current_image_index + 1}/{n}")
         update_image()
     else:
-        _safe_label_configure(_detect_progress_label, text="No result images found")
+        _detect_progress_text = "No result images found"
+        _safe_label_configure(_detect_progress_label, text=_detect_progress_text)
         _safe_label_configure(image_index_label, text="No results")
 
 
@@ -3147,9 +3263,20 @@ sidebar = ctk.CTkFrame(master=root, width=SIDEBAR_W, corner_radius=0, fg_color="
 sidebar.pack(side="left", fill="y")
 sidebar.pack_propagate(False)
 
+# Logo image – decoded from embedded base64 data
+try:
+    import base64 as _b64
+    import io as _io
+    _logo_data  = _b64.b64decode(_LOGO_B64)
+    _logo_pil   = Image.open(_io.BytesIO(_logo_data)).resize((72, 72), Image.Resampling.LANCZOS)
+    _logo_ctk   = ctk.CTkImage(light_image=_logo_pil, dark_image=_logo_pil, size=(72, 72))
+    ctk.CTkLabel(sidebar, image=_logo_ctk, text="").pack(pady=(14, 4))
+except Exception:
+    pass  # logo is optional – skip silently if anything fails
+
 ctk.CTkLabel(
     sidebar, text="YOLO Studio", font=("Segoe UI", 17, "bold"), text_color="#cdd6f4"
-).pack(pady=(18, 2))
+).pack(pady=(2, 2))
 ctk.CTkLabel(
     sidebar, text="Train · Detect · Benchmark", font=("Segoe UI", 10), text_color="#6c7086"
 ).pack(pady=(0, 6))
