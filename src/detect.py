@@ -214,8 +214,8 @@ def detect_images(images_folder, model_path, callback=None):
 
     # Process images
     if image_files:
-        image_paths_list = [str(path) for path in image_files]
-        model.predict(image_paths_list, save=True, save_txt=True, imgsz=640, conf=0.5)
+        image_paths = [str(path) for path in image_files]
+        model.predict(image_paths, save=True, save_txt=True, imgsz=640, conf=0.5)
 
         latest_run_dir = _find_latest_predict_run()
         if latest_run_dir:

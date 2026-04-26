@@ -168,8 +168,13 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
 
     model = YOLO(model_file).to(device)
 
-    # Determine the Ultralytics task sub-directory used for this run
-    task = 'segment' if (model_type and '-seg' in model_type) else 'detect'
+    # Determine the Ultralytics task sub-directory used for this run.
+    # Check both the model_type name and the custom model filename so that
+    # segmentation custom models are also detected correctly.
+    seg_hint = (model_type and '-seg' in model_type) or (
+        custom_model_path and '-seg' in Path(custom_model_path).stem
+    )
+    task = 'segment' if seg_hint else 'detect'
 
     results = model.train(
         data=data_yaml, epochs=epochs, batch=batch,
