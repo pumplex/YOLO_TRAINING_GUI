@@ -2113,29 +2113,14 @@ def _start_live_video() -> None:
         audio_want = False
 
     if audio_want:
-        # Extract raw PCM once in a background thread, then start streaming.
-        # Speed is always 1.0 at extraction time; the sounddevice callback
-        # adjusts playback speed in real-time via resampling.
-        _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
-        vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-
-        def _extract_and_stream():
-            pcm = _pcm_extract(_live_video_path)
-            if pcm is not None:
-                # Start playing from frame 0; the video thread updates speed
-                _pcm_start_stream(pcm, start_pos_secs=0.0, volume=vol)
-            else:
-                root.after(0, lambda: messagebox.showinfo(
-                    "Audio Unavailable",
-                    "Could not extract audio.\n\n"
-                    "Make sure ffmpeg is installed and available on your system PATH:\n"
-                    "  Windows: https://ffmpeg.org/download.html\n"
-                    "  macOS:   brew install ffmpeg\n"
-                    "  Linux:   sudo apt install ffmpeg\n\n"
-                    "Video will play without audio.",
-                ))
-
-        threading.Thread(target=_extract_and_stream, daemon=True).start()
+        # Delegate audio extraction entirely to the video thread's first-frame
+        # handler so there is only one code path.  Just show the extracting
+        # label here so the user gets immediate visual feedback.
+        _safe_label_configure(
+            _live_video_status_label,
+            text="⏳ Extracting audio…",
+            text_color="#64b5f6",
+        )
 
     threading.Thread(target=_live_video_thread, daemon=True).start()
 
@@ -2228,16 +2213,44 @@ def _live_video_thread() -> None:
             # ── Handle audio enabled/disabled while running ────────────────
             stream_active = _pcm_stream is not None
             if audio_want and not _audio_was_on and not stream_active:
-                # User just enabled audio mid-playback – start extraction now
+                # Audio was just turned on (or was requested at startup).
+                # Start extraction in a background thread – this is the ONLY
+                # place extraction is triggered so there is no race condition.
                 _audio_was_on = True
                 vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
                 _vid_path = _live_video_path
+                root.after(0, lambda: _safe_label_configure(
+                    _live_video_status_label,
+                    text="⏳ Extracting audio…",
+                    text_color="#64b5f6",
+                ))
 
                 def _late_stream(video_path=_vid_path, volume=vol):
                     pcm = _pcm_extract(video_path)
-                    if pcm is not None:
-                        start = _live_video_frame_ref[0] / max(_live_video_fps_ref[0], 1.0)
-                        _pcm_start_stream(pcm, start_pos_secs=start, volume=volume)
+                    if pcm is None:
+                        root.after(0, lambda: messagebox.showinfo(
+                            "Audio Unavailable",
+                            "Could not extract audio from the video file.\n\n"
+                            "Make sure ffmpeg is installed and on your system PATH:\n"
+                            "  Windows: https://ffmpeg.org/download.html\n"
+                            "  macOS:   brew install ffmpeg\n"
+                            "  Linux:   sudo apt install ffmpeg\n\n"
+                            "Video will continue without audio.",
+                        ))
+                        return
+                    start = _live_video_frame_ref[0] / max(_live_video_fps_ref[0], 1.0)
+                    ok = _pcm_start_stream(pcm, start_pos_secs=start, volume=volume)
+                    if not ok:
+                        root.after(0, lambda: messagebox.showinfo(
+                            "Audio Unavailable",
+                            "Could not open an audio output stream.\n\n"
+                            "Please ensure the following packages are installed:\n"
+                            "  pip install sounddevice numpy\n\n"
+                            "On Linux/macOS you also need PortAudio:\n"
+                            "  Linux:  sudo apt install libportaudio2\n"
+                            "  macOS:  brew install portaudio\n\n"
+                            "Video will continue without audio.",
+                        ))
 
                 threading.Thread(target=_late_stream, daemon=True).start()
             elif not audio_want and _audio_was_on:
