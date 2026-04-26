@@ -309,12 +309,17 @@ def _get_current_audio_speed_ratio(speed_ratio: float | None = None) -> float:
 
 
 def _audio_video_time_to_track_pos(video_seconds: float, speed_ratio: float | None = None) -> float:
-    """Convert original video time to the current extracted audio timeline."""
+    """Convert original video time to the adjusted audio-track timeline.
+
+    Faster playback (> 1.0) shortens the extracted track, so the returned track
+    position is smaller than *video_seconds*. Slower playback (< 1.0) stretches
+    the track, so the returned position is larger than *video_seconds*.
+    """
     return max(0.0, video_seconds / _get_current_audio_speed_ratio(speed_ratio))
 
 
 def _audio_track_elapsed_to_video_time(track_seconds: float) -> float:
-    """Convert elapsed adjusted-track playback time back to original video time."""
+    """Convert elapsed adjusted-track time back to the original video timeline."""
     return max(0.0, track_seconds * _get_current_audio_speed_ratio())
 
 
