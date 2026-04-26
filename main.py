@@ -298,7 +298,7 @@ def _audio_video_time_to_track_pos(video_seconds: float) -> float:
     """Convert original video time to the current extracted audio timeline."""
     try:
         speed_ratio = float(_live_audio_speed_ratio[0]) if _live_audio_speed_ratio else 1.0
-    except Exception:
+    except (TypeError, ValueError, IndexError):
         speed_ratio = 1.0
     return max(0.0, video_seconds / max(_MIN_AUDIO_SPEED_RATIO, speed_ratio))
 
@@ -307,7 +307,7 @@ def _audio_track_elapsed_to_video_time(track_seconds: float) -> float:
     """Convert elapsed adjusted-track playback time back to original video time."""
     try:
         speed_ratio = float(_live_audio_speed_ratio[0]) if _live_audio_speed_ratio else 1.0
-    except Exception:
+    except (TypeError, ValueError, IndexError):
         speed_ratio = 1.0
     return max(0.0, track_seconds * max(_MIN_AUDIO_SPEED_RATIO, speed_ratio))
 
