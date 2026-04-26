@@ -297,10 +297,20 @@ def detect_images(
         # Notify caller about the newly saved result image so the GUI can
         # display it immediately rather than waiting for all images to finish.
         if image_result_callback:
-            for result_file in sorted(results_dir.iterdir()):
-                if result_file.is_file() and result_file.stem == img_path.stem and is_valid_image(result_file):
-                    image_result_callback(str(result_file))
-                    break
+            # Fast path: YOLO normally preserves the original filename.
+            result_candidate = results_dir / img_path.name
+            if not (result_candidate.is_file() and is_valid_image(result_candidate)):
+                # Fallback: scan for any file whose stem matches (handles
+                # cases where YOLO converts the extension, e.g. PNG → JPEG).
+                result_candidate = None
+                for result_file in results_dir.iterdir():
+                    if (result_file.is_file()
+                            and result_file.stem == img_path.stem
+                            and is_valid_image(result_file)):
+                        result_candidate = result_file
+                        break
+            if result_candidate:
+                image_result_callback(str(result_candidate))
         current += 1
 
     # Process videos

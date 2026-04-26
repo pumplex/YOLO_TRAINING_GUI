@@ -999,7 +999,7 @@ def show_image_detection_window() -> None:
     detect_model_label.pack(fill="x", padx=12)
 
     _detect_model_info_label = ctk.CTkLabel(
-        cfg, text=_detect_model_info_text, font=("Segoe UI", 10), text_color="#a6adc8",
+        cfg, text=_detect_model_info_text, font=("Segoe UI", 10), text_color="#6c7086",
         anchor="w", wraplength=220, justify="left",
     )
     _detect_model_info_label.pack(fill="x", padx=12)
@@ -2645,7 +2645,12 @@ def start_training(
 def _run_training_subprocess(
     yaml_path: str, selected_model_size: str, workers_int: int = 8
 ) -> None:
-    global progress_bar, output_textbox
+    global progress_bar, output_textbox, _train_log_buffer, _train_progress_value, _train_progress_text
+
+    # Clear the log buffer so previous training runs don't accumulate indefinitely
+    _train_log_buffer.clear()
+    _train_progress_value = 0.0
+    _train_progress_text  = ""
 
     cmd = [
         sys.executable, "src/train.py",
