@@ -14,11 +14,14 @@ def normalize_path(path):
     return str(Path(path).resolve())
 
 class CameraDetection:
-    def __init__(self, model_path, conf_threshold=0.5, half=False):
+    def __init__(self, model_path, conf_threshold=0.5, half=False, device: str = None):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.half = half
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device is not None:
+            self.device = device
+        else:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model.to(self.device)
         self.cap = None
         self.running = False
@@ -51,7 +54,7 @@ class CameraDetection:
             if not ret:
                 break
 
-            results = self.model.predict(frame, half=self.half, verbose=False)
+            results = self.model.predict(frame, half=self.half, verbose=False, device=self.device)
             detection_frame = frame.copy()
             self._draw_bounding_boxes(detection_frame, results)
 
@@ -118,7 +121,7 @@ class CameraDetection:
         cv2.imwrite(origin_image_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 9])
 
         # Run detection and draw bounding boxes
-        results = self.model.predict(frame, half=self.half, verbose=False)
+        results = self.model.predict(frame, half=self.half, verbose=False, device=self.device)
         self._draw_bounding_boxes(frame, results)
 
         # Save annotated frame (JPEG to reduce file size)
