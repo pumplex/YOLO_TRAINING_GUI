@@ -115,12 +115,39 @@ def _get_device() -> str:
 # Named constants for audio extraction and sync
 _AUDIO_EXTRACTION_TIMEOUT_SECS = 120   # max seconds to wait for ffmpeg
 _MIN_AUDIO_FILE_SIZE_BYTES      = 100   # sanity check: file must be non-trivial
-_AUDIO_SYNC_CHECK_INTERVAL      = 10    # frames between sync checks
-_AUDIO_SYNC_THRESHOLD_SECS      = 0.3   # seconds of drift before resyncing
+_AUDIO_SYNC_CHECK_INTERVAL      = 15    # frames between sync checks (less frequent = fewer stutters)
+_AUDIO_SYNC_THRESHOLD_SECS      = 1.5   # seconds of drift before hard-resyncing
+_AUDIO_CALIB_FRAMES             = 40    # frames to sample before speed-matching audio
 
 
-def _audio_extract(video_path: str):
+def _atempo_filter_chain(speed: float) -> list:
+    """Return a list of atempo values that chain-multiply to *speed*.
+
+    Each atempo value must be in [0.5, 2.0] (ffmpeg constraint).
+    The product of all returned values equals *speed*.
+    """
+    if speed <= 0.0:
+        return [0.5]
+    filters = []
+    # Handle values below 1.0 by chaining 0.5 multipliers
+    while speed < 0.5:
+        filters.append(0.5)
+        speed /= 0.5
+    # Handle values above 2.0 by chaining 2.0 multipliers
+    while speed > 2.0:
+        filters.append(2.0)
+        speed /= 2.0
+    filters.append(round(speed, 4))
+    return filters
+
+
+def _audio_extract(video_path: str, speed: float = 1.0):
     """Extract audio track from *video_path* via ffmpeg.
+
+    When *speed* differs from 1.0 the audio is time-stretched using ffmpeg's
+    atempo filter so that playback duration matches the video's actual display
+    speed.  speed=0.5 means the video plays at half the original framerate, so
+    the audio must also be slowed to match.
 
     When the user has enabled RAM mode the audio data is returned as an
     ``io.BytesIO`` object.  Otherwise the data is written to a file inside
@@ -134,6 +161,14 @@ def _audio_extract(video_path: str):
     """
     use_ram = (_get_temp_dir() is None)
 
+    # Build the audio filter argument (atempo chain if speed != 1.0)
+    atempo_vals = _atempo_filter_chain(speed)
+    if len(atempo_vals) == 1 and abs(atempo_vals[0] - 1.0) < 0.01:
+        af_args = []  # no filter needed
+    else:
+        af_str = ",".join(f"atempo={v}" for v in atempo_vals)
+        af_args = ["-filter:a", af_str]
+
     if use_ram:
         # Extract directly to stdout pipe – no disk I/O
         try:
@@ -141,6 +176,7 @@ def _audio_extract(video_path: str):
                 [
                     "ffmpeg", "-y", "-i", video_path,
                     "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+                ] + af_args + [
                     "-f", "mp3", "pipe:1",
                 ],
                 capture_output=True,
@@ -166,8 +202,7 @@ def _audio_extract(video_path: str):
                 [
                     "ffmpeg", "-y", "-i", video_path,
                     "-vn", "-acodec", "libmp3lame", "-q:a", "4",
-                    temp,
-                ],
+                ] + af_args + [temp],
                 capture_output=True,
                 timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
             )
@@ -1029,12 +1064,19 @@ def show_ai_train_window() -> None:
     train_data_btn.pack(fill="x", **PAD)
     Tooltip(
         train_data_btn,
-        "Select a folder containing paired image + YOLO annotation (.txt) files.\n\n"
-        "Expected layout:\n"
-        "  folder/\n"
-        "    photo1.jpg   photo1.txt\n"
-        "    photo2.png   photo2.txt  …\n\n"
-        "The app will automatically split 80 % → train, 20 % → val.\n\n"
+        "Select a folder containing your YOLO-format image+annotation pairs.\n\n"
+        "Supported layouts (auto-detected):\n"
+        "  1. Flat pairs in root:\n"
+        "       folder/photo1.jpg  folder/photo1.txt …\n\n"
+        "  2. Separate images/ and labels/ sub-folders:\n"
+        "       folder/images/photo1.jpg\n"
+        "       folder/labels/photo1.txt\n\n"
+        "  3. Split sub-folders (any capitalisation):\n"
+        "       folder/Train/images/  folder/Train/labels/\n"
+        "       folder/Valid/images/  folder/Valid/labels/\n\n"
+        "  4. Pre-split train/val:\n"
+        "       folder/train/images/  folder/val/images/\n\n"
+        "For layouts 1–3 the app automatically creates an 80/20 train/val split.\n\n"
         "If you imported a Roboflow ZIP above, this is set automatically.",
     )
     train_data_label = ctk.CTkLabel(
@@ -1530,48 +1572,57 @@ def show_image_detection_window() -> None:
     viewer.place(relx=0.29, rely=0, relwidth=0.71, relheight=1.0)
 
     image_label = tk.Label(viewer, bg="#0d1117")
-    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.85)
+    image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
 
-    # Bottom navigation bar (taller to accommodate zoom slider)
+    # Bottom navigation bar (compact, two slim rows)
     _detect_nav_bar = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#1e1e2e")
-    _detect_nav_bar.place(relx=0, rely=0.85, relwidth=1.0, relheight=0.15)
+    _detect_nav_bar.place(relx=0, rely=0.88, relwidth=1.0, relheight=0.12)
 
     # ── Row 1: navigation controls (top half of bar) ─────────────────────
     ctk.CTkButton(
         _detect_nav_bar, text="◀", command=show_prev_image,
         fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
-    ).place(relx=0.01, rely=0.05, relwidth=0.07, relheight=0.40)
+    ).place(relx=0.01, rely=0.05, relwidth=0.07, relheight=0.42)
 
-    image_index_label = ctk.CTkLabel(_detect_nav_bar, text="No results", font=("Segoe UI", 13))
-    image_index_label.place(relx=0.09, rely=0.05, relwidth=0.18, relheight=0.40)
+    image_index_label = ctk.CTkLabel(_detect_nav_bar, text="No results", font=("Segoe UI", 11))
+    image_index_label.place(relx=0.09, rely=0.05, relwidth=0.18, relheight=0.42)
 
     ctk.CTkButton(
         _detect_nav_bar, text="▶", command=show_next_image,
         fg_color="#1976d2", font=("Segoe UI", 18, "bold"), height=32, width=40,
-    ).place(relx=0.28, rely=0.05, relwidth=0.07, relheight=0.40)
+    ).place(relx=0.28, rely=0.05, relwidth=0.07, relheight=0.42)
 
     ctk.CTkButton(
         _detect_nav_bar, text="⛶  Full Screen", command=_open_fullscreen_image,
         fg_color="#37474f", hover_color="#263238",
-        font=("Segoe UI", 12), height=32,
-    ).place(relx=0.37, rely=0.05, relwidth=0.16, relheight=0.40)
+        font=("Segoe UI", 11), height=28,
+    ).place(relx=0.37, rely=0.05, relwidth=0.14, relheight=0.42)
     Tooltip(_detect_nav_bar.winfo_children()[-1], "Open the current image in a full-screen viewer.")
 
-    # ── Zoom slider (above progress bar, top-right of bar) ────────────────
+    # ── Zoom label (top row, right of Full Screen) ────────────────────────
     global _detect_zoom_var
     _detect_zoom_var = ctk.DoubleVar(value=1.0)
 
     zoom_lbl = ctk.CTkLabel(
-        _detect_nav_bar, text="🔍 1.00×", font=("Segoe UI", 10), anchor="w"
+        _detect_nav_bar, text="🔍 1.00×", font=("Segoe UI", 9), anchor="w"
     )
-    zoom_lbl.place(relx=0.55, rely=0.05, relwidth=0.09, relheight=0.40)
+    zoom_lbl.place(relx=0.52, rely=0.05, relwidth=0.07, relheight=0.42)
 
+    # ── Progress label (top row, right of zoom label) ─────────────────────
+    _detect_progress_label = ctk.CTkLabel(
+        _detect_nav_bar, text=_detect_progress_text,
+        font=("Segoe UI", 9), text_color="#a6adc8", anchor="w",
+    )
+    _detect_progress_label.place(relx=0.60, rely=0.05, relwidth=0.39, relheight=0.42)
+
+    # ── Row 2: zoom slider + progress bar side by side ────────────────────
     zoom_slider = ctk.CTkSlider(
         _detect_nav_bar, from_=0.25, to=2.0,
         variable=_detect_zoom_var,
         number_of_steps=int((2.0 - 0.25) / 0.05),  # 0.05× steps
+        height=14,
     )
-    zoom_slider.place(relx=0.55, rely=0.55, relwidth=0.09, relheight=0.35)
+    zoom_slider.place(relx=0.52, rely=0.55, relwidth=0.07, relheight=0.36)
 
     def _on_zoom(*_):
         z = _detect_zoom_var.get()
@@ -1586,18 +1637,11 @@ def show_image_detection_window() -> None:
         "0.25× = thumbnail view   1.00× = fit to panel   2.00× = zoomed in",
     )
 
-    # ── Progress label and bar (right side, both rows) ────────────────────
-    _detect_progress_label = ctk.CTkLabel(
-        _detect_nav_bar, text=_detect_progress_text,
-        font=("Segoe UI", 11), text_color="#a6adc8", anchor="w",
-    )
-    _detect_progress_label.place(relx=0.66, rely=0.05, relwidth=0.33, relheight=0.40)
-
     detection_progress_bar = ctk.CTkProgressBar(
-        _detect_nav_bar, progress_color="#43a047", mode="determinate", height=6,
+        _detect_nav_bar, progress_color="#43a047", mode="determinate", height=5,
     )
     detection_progress_bar.set(_detect_progress_value)
-    detection_progress_bar.place(relx=0.66, rely=0.62, relwidth=0.33, relheight=0.28)
+    detection_progress_bar.place(relx=0.60, rely=0.58, relwidth=0.39, relheight=0.34)
 
     # Restore previously loaded result images if any exist
     if image_paths:
@@ -1741,20 +1785,20 @@ def show_live_video_window() -> None:
     half_chk = ctk.CTkCheckBox(
         bar, text="FP16", variable=_live_video_half_var, font=FONT,
     )
-    half_chk.place(relx=0.01, rely=0.64, relwidth=0.07, relheight=0.30)
+    half_chk.place(relx=0.01, rely=0.64, relwidth=0.065, relheight=0.30)
     Tooltip(half_chk, "Run inference in half-precision (FP16) for ~2× speed on NVIDIA GPUs.")
 
-    # ── Confidence threshold ───────────────────────────────────────────────
+    # ── Confidence threshold (compact) ────────────────────────────────────
     _live_video_conf_var = ctk.DoubleVar(value=0.5)
     conf_lbl = ctk.CTkLabel(bar, text="Conf:", font=FONT, anchor="w")
-    conf_lbl.place(relx=0.09, rely=0.64, relwidth=0.05, relheight=0.30)
+    conf_lbl.place(relx=0.08, rely=0.64, relwidth=0.04, relheight=0.30)
     conf_slider = ctk.CTkSlider(
         bar, from_=0.01, to=1.0, variable=_live_video_conf_var,
-        number_of_steps=99, width=80,
+        number_of_steps=99, width=70,
     )
-    conf_slider.place(relx=0.14, rely=0.68, relwidth=0.10, relheight=0.25)
+    conf_slider.place(relx=0.12, rely=0.68, relwidth=0.08, relheight=0.22)
     conf_val_lbl = ctk.CTkLabel(bar, text="0.50", font=FONT, anchor="w")
-    conf_val_lbl.place(relx=0.25, rely=0.64, relwidth=0.05, relheight=0.30)
+    conf_val_lbl.place(relx=0.21, rely=0.64, relwidth=0.04, relheight=0.30)
     _live_video_conf_var.trace_add(
         "write",
         lambda *_: conf_val_lbl.configure(text=f"{_live_video_conf_var.get():.2f}"),
@@ -1766,7 +1810,7 @@ def show_live_video_window() -> None:
     audio_chk = ctk.CTkCheckBox(
         bar, text="🔊 Audio", variable=_live_audio_enabled_var, font=FONT,
     )
-    audio_chk.place(relx=0.31, rely=0.64, relwidth=0.09, relheight=0.30)
+    audio_chk.place(relx=0.26, rely=0.64, relwidth=0.09, relheight=0.30)
     Tooltip(
         audio_chk,
         "Enable audio playback alongside the detection video.\n\n"
@@ -1779,25 +1823,25 @@ def show_live_video_window() -> None:
     sync_chk = ctk.CTkCheckBox(
         bar, text="Sync", variable=_live_audio_sync_var, font=FONT,
     )
-    sync_chk.place(relx=0.41, rely=0.64, relwidth=0.065, relheight=0.30)
+    sync_chk.place(relx=0.36, rely=0.64, relwidth=0.065, relheight=0.30)
     Tooltip(
         sync_chk,
-        "Periodically re-synchronise audio to the current video frame.\n"
-        "Uses time-skipping: if audio drifts more than 0.3 s behind the\n"
-        "video, it seeks forward to match.  Recommended to leave on.",
+        "Match audio playback speed to the actual video FPS.\n"
+        "After a short calibration phase the audio is re-extracted at the\n"
+        "correct speed so that audio and video stay in sync without stutters.",
     )
 
-    # ── Volume control ─────────────────────────────────────────────────────
+    # ── Volume control (to the left of the Video button at relx=0.51) ─────
     _live_audio_volume_var = ctk.DoubleVar(value=1.0)
     vol_lbl = ctk.CTkLabel(bar, text="Vol:", font=FONT, anchor="w")
-    vol_lbl.place(relx=0.478, rely=0.64, relwidth=0.04, relheight=0.30)
+    vol_lbl.place(relx=0.43, rely=0.64, relwidth=0.03, relheight=0.30)
     vol_slider = ctk.CTkSlider(
         bar, from_=0.0, to=1.0, variable=_live_audio_volume_var,
-        number_of_steps=20, width=60,
+        number_of_steps=20, width=50,
     )
-    vol_slider.place(relx=0.518, rely=0.68, relwidth=0.075, relheight=0.25)
+    vol_slider.place(relx=0.46, rely=0.68, relwidth=0.04, relheight=0.22)
     vol_val_lbl = ctk.CTkLabel(bar, text="100%", font=FONT, anchor="w")
-    vol_val_lbl.place(relx=0.595, rely=0.64, relwidth=0.04, relheight=0.30)
+    vol_val_lbl.place(relx=0.50, rely=0.64, relwidth=0.04, relheight=0.30)
 
     def _on_volume_change(*_):
         v = _live_audio_volume_var.get()
@@ -2127,7 +2171,22 @@ def _stop_live_video() -> None:
 
 
 def _live_video_thread() -> None:
-    """Background thread: open video, run YOLO frame-by-frame, display in label."""
+    """Background thread: open video, run YOLO frame-by-frame, display in label.
+
+    Audio sync strategy
+    -------------------
+    1. During the first _AUDIO_CALIB_FRAMES frames we measure the actual
+       per-frame processing time (inference + display).
+    2. Once calibration is complete we compute the speed ratio
+       (actual fps / original fps).  If the ratio differs from 1.0 by more
+       than 5 % we re-extract the audio with ffmpeg's atempo filter so the
+       audio duration stretches to match the slower (or faster) playback.
+    3. The re-extracted audio is then played from the current video position,
+       giving smooth sync without any seek jumps or stutters.
+    4. A background hard-resync (seek) is still applied as a safety net but
+       only fires when drift exceeds _AUDIO_SYNC_THRESHOLD_SECS (1.5 s by
+       default), which is rare after speed-matching.
+    """
     try:
         from ultralytics import YOLO as _YOLO
 
@@ -2161,6 +2220,10 @@ def _live_video_thread() -> None:
         frame_idx = 0
         _audio_was_on = False  # track whether audio was playing last iteration
 
+        # Calibration state for speed-matched audio
+        _calib_times: list = []            # per-frame wall-clock durations
+        _audio_speed_calibrated = False    # whether we have re-extracted audio
+
         while not _live_video_cancel_flag[0]:
             # ── Read per-frame controls (take effect immediately) ──────────
             half = _live_video_half_var.get() if _live_video_half_var else False
@@ -2175,7 +2238,8 @@ def _live_video_thread() -> None:
             # ── Handle audio on/off toggled while running ──────────────────
             audio_source = _live_audio_temp_file or _live_audio_bytes_io
             if audio_want and not _audio_was_on and audio_source is None:
-                # User just enabled audio – extract in background
+                # User just enabled audio – extract in background (initial speed=1.0;
+                # calibration will re-extract with the correct speed later if needed)
                 vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
                 _vid_path = _live_video_path
                 _frame_idx = frame_idx
@@ -2195,10 +2259,14 @@ def _live_video_thread() -> None:
 
                 threading.Thread(target=_late_extract, daemon=True).start()
                 _audio_was_on = True
+                _audio_speed_calibrated = False  # allow recalibration on re-enable
+                _calib_times.clear()
             elif not audio_want and _audio_was_on:
                 # User just disabled audio
                 _cleanup_live_audio()
                 _audio_was_on = False
+                _audio_speed_calibrated = False
+                _calib_times.clear()
             elif audio_want:
                 _audio_was_on = True
 
@@ -2243,9 +2311,78 @@ def _live_video_thread() -> None:
             frame_proc_time = t_after_predict - t_start
             actual_fps = 1.0 / max(frame_proc_time, 0.001)
 
-            # ── Periodic audio sync (skip-based) ──────────────────────────
+            # ── Calibration: collect timing samples ───────────────────────
+            if not _audio_speed_calibrated and frame_idx < _AUDIO_CALIB_FRAMES:
+                _calib_times.append(frame_proc_time)
+
+            # ── After calibration: re-extract audio at correct speed ───────
+            if (
+                not _audio_speed_calibrated
+                and frame_idx >= _AUDIO_CALIB_FRAMES
+                and _calib_times
+                and audio_want
+                and audio_sync
+            ):
+                avg_proc = sum(_calib_times) / len(_calib_times)
+                # Actual playback fps = 1 / total_time_per_frame including throttle
+                # Use total frame_delay (min of proc_time, 1/fps) as display rate
+                avg_display_time = max(avg_proc, frame_delay)
+                measured_fps = 1.0 / avg_display_time
+                speed_ratio = measured_fps / fps   # <1 when inference is slower
+
+                _audio_speed_calibrated = True     # only calibrate once per play session
+
+                # Only re-extract if deviation > 5 % (no-op for fast hardware)
+                if abs(1.0 - speed_ratio) > 0.05:
+                    _audio_src = _live_audio_temp_file or _live_audio_bytes_io
+                    if _audio_src is not None:
+                        _vid_path = _live_video_path
+                        _cur_frame = frame_idx
+                        _vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+                        _speed = max(0.1, min(10.0, speed_ratio))
+
+                        def _respeed(
+                            video_path=_vid_path,
+                            start_frame=_cur_frame,
+                            sp=_speed,
+                            vol=_vol,
+                        ):
+                            global _live_audio_temp_file, _live_audio_bytes_io
+                            _audio_stop()
+                            # Clean up old temp file before creating new one
+                            old_tmp = _live_audio_temp_file
+                            _live_audio_temp_file = None
+                            _live_audio_bytes_io = None
+                            if old_tmp:
+                                try:
+                                    os.unlink(old_tmp)
+                                except Exception:
+                                    pass
+
+                            file_path, bio = _audio_extract(video_path, speed=sp)
+                            # Audio start position in the *speed-adjusted* track
+                            # corresponds to original_time * speed_ratio
+                            start_pos_adj = (start_frame / fps) * sp
+                            if bio is not None:
+                                _live_audio_bytes_io = bio
+                                _live_audio_wall_start[0] = time.time() - (start_frame / fps)
+                                _audio_play(bio, start_pos=start_pos_adj, volume=vol)
+                            elif file_path is not None:
+                                _live_audio_temp_file = file_path
+                                _live_audio_wall_start[0] = time.time() - (start_frame / fps)
+                                _audio_play(file_path, start_pos=start_pos_adj, volume=vol)
+
+                        threading.Thread(target=_respeed, daemon=True).start()
+
+            # ── Periodic hard-resync (safety net for residual drift) ───────
             _audio_src = _live_audio_temp_file or _live_audio_bytes_io
-            if audio_sync and _audio_src and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0 and frame_idx > 0:
+            if (
+                audio_sync
+                and _audio_src
+                and _audio_speed_calibrated
+                and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0
+                and frame_idx > _AUDIO_CALIB_FRAMES
+            ):
                 video_time = frame_idx / fps
                 elapsed_wall = time.time() - _live_audio_wall_start[0]
                 drift = video_time - elapsed_wall

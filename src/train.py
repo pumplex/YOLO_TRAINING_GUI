@@ -47,20 +47,103 @@ def normalize_path(path):
         return path
     return str(Path(path).resolve())
 
+def _find_paired_files_in_dir(images_dir: Path, labels_dir: Path) -> list:
+    """Return a list of (img_name, lbl_name) pairs from separate images/labels directories."""
+    paired = []
+    for img_path in images_dir.iterdir():
+        if img_path.is_file() and is_valid_image(str(img_path)):
+            lbl_path = labels_dir / img_path.with_suffix('.txt').name
+            if lbl_path.exists():
+                paired.append((img_path.name, lbl_path.name))
+    return paired
+
+
 def prepare_data(train_data_path):
     train_data_path = normalize_path(train_data_path)
     train_path = Path(train_data_path)
-    train_dir_exists = (train_path / 'train/images').exists() and (train_path / 'train/labels').exists()
-    val_dir_exists = (train_path / 'val/images').exists() and (train_path / 'val/labels').exists()
 
+    # ── Case 1: Already has lowercase train/val split ─────────────────────────
+    train_dir_exists = (
+        (train_path / 'train/images').exists()
+        and (train_path / 'train/labels').exists()
+    )
+    val_dir_exists = (
+        (train_path / 'val/images').exists()
+        and (train_path / 'val/labels').exists()
+    )
     if train_dir_exists and val_dir_exists:
         print("Train and validation directories already exist. Skipping file preparation.")
         return
 
+    # ── Case 2: Sub-folder split (e.g. Train/images, Valid/images) ────────────
+    # Accept any capitalisation of: train, valid, val, test
+    _SPLIT_ALIASES = {
+        'train': ['train', 'Train', 'TRAIN'],
+        'val':   ['val', 'Val', 'VAL', 'valid', 'Valid', 'VALID', 'validation', 'Validation'],
+        'test':  ['test', 'Test', 'TEST'],
+    }
+    found_splits = {}  # canonical_name → (images_dir, labels_dir)
+    for canonical, aliases in _SPLIT_ALIASES.items():
+        for alias in aliases:
+            img_d = train_path / alias / 'images'
+            lbl_d = train_path / alias / 'labels'
+            if img_d.exists() and lbl_d.exists():
+                found_splits[canonical] = (img_d, lbl_d)
+                break
+
+    if 'train' in found_splits:
+        # Normalise by moving files into the expected lowercase train/val layout
+        for path in ['train/images', 'train/labels', 'val/images', 'val/labels']:
+            (train_path / path).mkdir(parents=True, exist_ok=True)
+
+        for canonical, (img_d, lbl_d) in found_splits.items():
+            dest_key = canonical if canonical in ('train', 'val') else 'train'
+            dst_img = train_path / dest_key / 'images'
+            dst_lbl = train_path / dest_key / 'labels'
+            dst_img.mkdir(parents=True, exist_ok=True)
+            dst_lbl.mkdir(parents=True, exist_ok=True)
+            for f in img_d.iterdir():
+                if f.is_file():
+                    shutil.move(str(f), str(dst_img / f.name))
+            for f in lbl_d.iterdir():
+                if f.is_file():
+                    shutil.move(str(f), str(dst_lbl / f.name))
+
+        # If no val split was found, fall back to splitting the train set
+        if 'val' not in found_splits:
+            _split_images_labels(
+                train_path / 'train/images',
+                train_path / 'train/labels',
+                train_path,
+            )
+        print("Normalised sub-folder split layout. Preparation complete.")
+        return
+
+    # ── Case 3: Flat images/ + labels/ sub-directories (no split) ─────────────
+    flat_imgs = train_path / 'images'
+    flat_lbls = train_path / 'labels'
+    if flat_imgs.exists() and flat_lbls.exists():
+        for path in ['train/images', 'train/labels', 'val/images', 'val/labels']:
+            (train_path / path).mkdir(parents=True, exist_ok=True)
+
+        paired_files = _find_paired_files_in_dir(flat_imgs, flat_lbls)
+        random.seed(0)
+        random.shuffle(paired_files)
+        split_idx = int(len(paired_files) * 0.8)
+
+        for img_name, lbl_name in paired_files[:split_idx]:
+            shutil.move(str(flat_imgs / img_name), str(train_path / 'train/images' / img_name))
+            shutil.move(str(flat_lbls / lbl_name), str(train_path / 'train/labels' / lbl_name))
+        for img_name, lbl_name in paired_files[split_idx:]:
+            shutil.move(str(flat_imgs / img_name), str(train_path / 'val/images' / img_name))
+            shutil.move(str(flat_lbls / lbl_name), str(train_path / 'val/labels' / lbl_name))
+        print("Prepared data from flat images/labels directories. Preparation complete.")
+        return
+
+    # ── Case 4: Flat files in root (image + .txt pairs side by side) ──────────
     for path in ['train/images', 'train/labels', 'val/images', 'val/labels']:
         (train_path / path).mkdir(parents=True, exist_ok=True)
 
-    # Find all valid image files and their corresponding txt files
     paired_files = []
     for file_path in Path(train_data_path).iterdir():
         if file_path.is_file() and is_valid_image(str(file_path)):
@@ -76,6 +159,23 @@ def prepare_data(train_data_path):
 
     move_files(train_files, train_data_path, 'train')
     move_files(val_files, train_data_path, 'val')
+
+
+def _split_images_labels(images_dir: Path, labels_dir: Path, base_path: Path) -> None:
+    """Split files from images_dir/labels_dir into base_path/train and base_path/val."""
+    paired = _find_paired_files_in_dir(images_dir, labels_dir)
+    random.seed(0)
+    random.shuffle(paired)
+    split_idx = int(len(paired) * 0.8)
+
+    val_img = base_path / 'val/images'
+    val_lbl = base_path / 'val/labels'
+    val_img.mkdir(parents=True, exist_ok=True)
+    val_lbl.mkdir(parents=True, exist_ok=True)
+
+    for img_name, lbl_name in paired[split_idx:]:
+        shutil.move(str(images_dir / img_name), str(val_img / img_name))
+        shutil.move(str(labels_dir / lbl_name), str(val_lbl / lbl_name))
 
 def move_files(files, base_path, data_type):
     base_path = Path(base_path)
