@@ -2399,8 +2399,8 @@ def _live_video_thread() -> None:
                     # Producer is behind; update EMA with a slow speed and
                     # loop so audio adjusts without displaying a stale frame.
                     wait = time.perf_counter() - t_start
-                    _ema_speed = 0.6 * _ema_speed + 0.4 * (
-                        frame_delay / max(wait, 1e-6)
+                    _ema_speed = 0.6 * _ema_speed + 0.4 * min(
+                        frame_delay / max(wait, 1e-6), 1.0
                     )
                     if audio_want and _pcm_stream is not None and audio_sync:
                         _pcm_speed[0] = max(0.05, _ema_speed)
@@ -2412,6 +2412,19 @@ def _live_video_thread() -> None:
                 frame_idx, annotated, raw_frame, det_count = item
                 _live_video_raw_frame[0] = raw_frame
                 _live_video_ann_frame[0] = annotated
+
+                # ── Cap-mode throttle: sleep to fill the native frame period ─
+                # Account for queue-wait time so we don't over-sleep.
+                elapsed = time.perf_counter() - t_start
+                sleep_t = max(0.001, frame_delay - elapsed)
+                time.sleep(sleep_t)
+
+                # Measure full consumer cycle time (queue wait + sleep)
+                total_frame_time = time.perf_counter() - t_start
+                actual_fps = 1.0 / max(total_frame_time, 0.001)
+
+                # Cap raw_speed ≤ 1.0 so audio never pitches above normal
+                raw_speed = min(frame_delay / max(total_frame_time, 1e-6), 1.0)
             else:
                 # ── Inline: read frame and run YOLO ───────────────────────
                 ret, frame = cap.read()
@@ -2430,27 +2443,21 @@ def _live_video_thread() -> None:
                 _live_video_ann_frame[0] = annotated
                 det_count = len(results[0].boxes)
 
+                # ── Measure inference time (before display prep and sleep) ─
+                t_after_predict = time.perf_counter()
+                frame_proc_time = t_after_predict - t_start
+                # Total time is at least one native frame period
+                total_frame_time = max(frame_proc_time, frame_delay)
+                # Report inference speed (not throttled display speed)
+                actual_fps = 1.0 / max(frame_proc_time, 0.001)
+                raw_speed = frame_delay / max(total_frame_time, 1e-6)
+
             # Update shared state
             _live_video_frame_ref[0] = frame_idx
             frac = frame_idx / total_frames
 
-            # ── Throttle to video fps (consumer always sleeps here) ────────
-            # Do this before EMA so total_frame_time reflects a full display
-            # period, not just inference time.
-            elapsed = time.perf_counter() - t_start
-            sleep_t = max(0.001, frame_delay - elapsed)
-            time.sleep(sleep_t)
-
-            # ── Measure actual elapsed time for this display period ────────
-            total_frame_time = time.perf_counter() - t_start
-            actual_fps = 1.0 / max(total_frame_time, 0.001)  # shown in status bar
-
             # ── Smooth audio speed to match actual video throughput ────────
             # EMA of the speed ratio (alpha=0.4 → converges in ~4 frames).
-            # In cap mode raw_speed is capped at 1.0 so audio never pitches up.
-            raw_speed = frame_delay / max(total_frame_time, 1e-6)
-            if cap_mode:
-                raw_speed = min(raw_speed, 1.0)
             _ema_speed = 0.6 * _ema_speed + 0.4 * raw_speed
 
             if audio_want and _pcm_stream is not None:
@@ -2511,7 +2518,13 @@ def _live_video_thread() -> None:
                         pass
 
             root.after(0, _update)
+
             if not cap_mode:
+                # Throttle AFTER display prep so prep time counts against the
+                # sleep budget (identical to the original single-thread loop).
+                elapsed = time.perf_counter() - t_start
+                sleep_t = max(0.001, frame_delay - elapsed)
+                time.sleep(sleep_t)
                 frame_idx += 1
 
         cap.release()
