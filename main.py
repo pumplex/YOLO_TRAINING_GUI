@@ -5,6 +5,7 @@ import os
 import sys
 import re
 import time
+import json
 import cv2
 import customtkinter as ctk
 import tkinter as tk
@@ -18,6 +19,37 @@ from queue import Queue, Empty
 from datetime import datetime
 from src.train import create_yaml
 from src.detect import detect_images, is_valid_image, get_model_info, get_media_files
+
+# ── Centralised models cache (set before any YOLO import in subprocesses) ─────
+_APP_DIR = Path(__file__).parent
+_MODELS_DIR = _APP_DIR / "models"
+_MODELS_DIR.mkdir(exist_ok=True)
+try:
+    from ultralytics import settings as _ult_settings
+    _ult_settings.update({"weights_dir": str(_MODELS_DIR)})
+except Exception:
+    pass
+
+# ── Persistent app configuration (window size etc.) ───────────────────────────
+_CONFIG_FILE = _APP_DIR / ".yolo_studio_config.json"
+
+
+def _load_app_config() -> dict:
+    try:
+        if _CONFIG_FILE.exists():
+            with open(_CONFIG_FILE, "r", encoding="utf-8") as _f:
+                return json.load(_f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_app_config(data: dict) -> None:
+    try:
+        with open(_CONFIG_FILE, "w", encoding="utf-8") as _f:
+            json.dump(data, _f)
+    except Exception:
+        pass
 from src.camera import CameraDetection
 
 # ── ANSI / terminal-escape stripping ──────────────────────────────────────────
@@ -136,6 +168,37 @@ SEGMENTATION_MODELS = [
     "YOLOv11-Large-Seg",     "YOLOv11-ExtraLarge-Seg",
 ]
 
+CLASSIFICATION_MODELS = [
+    "YOLOv8-Nano-Cls",       "YOLOv8-Small-Cls",      "YOLOv8-Medium-Cls",
+    "YOLOv8-Large-Cls",      "YOLOv8-ExtraLarge-Cls",
+    "YOLOv11-Nano-Cls",      "YOLOv11-Small-Cls",     "YOLOv11-Medium-Cls",
+    "YOLOv11-Large-Cls",     "YOLOv11-ExtraLarge-Cls",
+]
+
+POSE_MODELS = [
+    "YOLOv8-Nano-Pose",      "YOLOv8-Small-Pose",     "YOLOv8-Medium-Pose",
+    "YOLOv8-Large-Pose",     "YOLOv8-ExtraLarge-Pose",
+    "YOLOv11-Nano-Pose",     "YOLOv11-Small-Pose",    "YOLOv11-Medium-Pose",
+    "YOLOv11-Large-Pose",    "YOLOv11-ExtraLarge-Pose",
+]
+
+OBB_MODELS = [
+    "YOLOv8-Nano-OBB",       "YOLOv8-Small-OBB",      "YOLOv8-Medium-OBB",
+    "YOLOv8-Large-OBB",      "YOLOv8-ExtraLarge-OBB",
+    "YOLOv11-Nano-OBB",      "YOLOv11-Small-OBB",     "YOLOv11-Medium-OBB",
+    "YOLOv11-Large-OBB",     "YOLOv11-ExtraLarge-OBB",
+]
+
+TASK_TYPE_OPTIONS = ["Detection", "Segmentation", "Classification", "Pose Estimation", "OBB Detection"]
+
+_MODELS_BY_TASK = {
+    "Detection":       DETECTION_MODELS,
+    "Segmentation":    SEGMENTATION_MODELS,
+    "Classification":  CLASSIFICATION_MODELS,
+    "Pose Estimation": POSE_MODELS,
+    "OBB Detection":   OBB_MODELS,
+}
+
 MODEL_MAP = {
     # Detection
     "YOLOv8-Nano":       "yolov8n",   "YOLOv8-Small":       "yolov8s",
@@ -158,6 +221,27 @@ MODEL_MAP = {
     "YOLOv11-Nano-Seg":       "yolo11n-seg",  "YOLOv11-Small-Seg":     "yolo11s-seg",
     "YOLOv11-Medium-Seg":     "yolo11m-seg",  "YOLOv11-Large-Seg":     "yolo11l-seg",
     "YOLOv11-ExtraLarge-Seg": "yolo11x-seg",
+    # Classification
+    "YOLOv8-Nano-Cls":        "yolov8n-cls",  "YOLOv8-Small-Cls":      "yolov8s-cls",
+    "YOLOv8-Medium-Cls":      "yolov8m-cls",  "YOLOv8-Large-Cls":      "yolov8l-cls",
+    "YOLOv8-ExtraLarge-Cls":  "yolov8x-cls",
+    "YOLOv11-Nano-Cls":       "yolo11n-cls",  "YOLOv11-Small-Cls":     "yolo11s-cls",
+    "YOLOv11-Medium-Cls":     "yolo11m-cls",  "YOLOv11-Large-Cls":     "yolo11l-cls",
+    "YOLOv11-ExtraLarge-Cls": "yolo11x-cls",
+    # Pose Estimation
+    "YOLOv8-Nano-Pose":       "yolov8n-pose", "YOLOv8-Small-Pose":     "yolov8s-pose",
+    "YOLOv8-Medium-Pose":     "yolov8m-pose", "YOLOv8-Large-Pose":     "yolov8l-pose",
+    "YOLOv8-ExtraLarge-Pose": "yolov8x-pose",
+    "YOLOv11-Nano-Pose":      "yolo11n-pose", "YOLOv11-Small-Pose":    "yolo11s-pose",
+    "YOLOv11-Medium-Pose":    "yolo11m-pose", "YOLOv11-Large-Pose":    "yolo11l-pose",
+    "YOLOv11-ExtraLarge-Pose": "yolo11x-pose",
+    # OBB Detection
+    "YOLOv8-Nano-OBB":        "yolov8n-obb",  "YOLOv8-Small-OBB":      "yolov8s-obb",
+    "YOLOv8-Medium-OBB":      "yolov8m-obb",  "YOLOv8-Large-OBB":      "yolov8l-obb",
+    "YOLOv8-ExtraLarge-OBB":  "yolov8x-obb",
+    "YOLOv11-Nano-OBB":       "yolo11n-obb",  "YOLOv11-Small-OBB":     "yolo11s-obb",
+    "YOLOv11-Medium-OBB":     "yolo11m-obb",  "YOLOv11-Large-OBB":     "yolo11l-obb",
+    "YOLOv11-ExtraLarge-OBB": "yolo11x-obb",
 }
 
 EXPORT_FORMATS = ["ONNX", "TensorRT Engine", "CoreML", "TF SavedModel", "TFLite"]
@@ -448,7 +532,8 @@ def _on_task_type_change(*_args) -> None:
     global model_menu_widget, selected_model_var, task_type_var
     if task_type_var is None or model_menu_widget is None:
         return
-    options = DETECTION_MODELS if task_type_var.get() == "Detection" else SEGMENTATION_MODELS
+    task = task_type_var.get()
+    options = _MODELS_BY_TASK.get(task, DETECTION_MODELS)
     selected_model_var.set(options[0])
     model_menu_widget.configure(values=options)
 
@@ -509,47 +594,73 @@ def show_ai_train_window() -> None:
         if not extract_dir:
             return
 
-        _safe_label_configure(_rf_status_label, text="⏳ Extracting…", text_color="#64b5f6")
-        config_panel.update_idletasks()
+        # Disable the import button while work is in progress
+        rf_btn.configure(state="disabled", text="⏳  Importing…")
+        _safe_label_configure(_rf_status_label, text="⏳ Starting extraction…", text_color="#64b5f6")
+        _rf_progress_bar.set(0)
+        _rf_progress_bar.pack(fill="x", padx=14, pady=(2, 0))
 
-        try:
-            from src.dataset import extract_roboflow_zip, count_dataset_images
-            root_path, yaml, names = extract_roboflow_zip(zip_path, extract_dir)
-        except Exception as exc:
-            messagebox.showerror("Import Error", f"Failed to extract ZIP:\n{exc}")
-            _safe_label_configure(_rf_status_label, text="Import failed.", text_color="#ef5350")
-            return
+        def _progress_cb(current: int, total: int, filename: str) -> None:
+            frac = current / max(total, 1)
+            msg = f"⏳ Extracting… {current}/{total}  ({frac * 100:.0f}%)"
+            root.after(0, lambda f=frac, m=msg: (
+                _rf_progress_bar.set(f),
+                _safe_label_configure(_rf_status_label, text=m, text_color="#64b5f6"),
+            ))
 
-        train_data_path    = root_path
-        roboflow_yaml_path = yaml
+        def _run_import():
+            try:
+                from src.dataset import extract_roboflow_zip, count_dataset_images
+                r_path, yaml, names = extract_roboflow_zip(
+                    zip_path, extract_dir, progress_callback=_progress_cb
+                )
+            except Exception as exc:
+                root.after(0, lambda: (
+                    messagebox.showerror("Import Error", f"Failed to extract ZIP:\n{exc}"),
+                    _safe_label_configure(_rf_status_label, text="Import failed.", text_color="#ef5350"),
+                    _rf_progress_bar.pack_forget(),
+                    rf_btn.configure(state="normal", text="📦  Import Roboflow ZIP…"),
+                ))
+                return
 
-        _safe_label_configure(train_data_label, text=Path(root_path).name, text_color="#64b5f6")
+            try:
+                from src.dataset import count_dataset_images
+                counts = count_dataset_images(r_path)
+                parts  = [f"{v} {k}" for k, v in counts.items()]
+                count_str = "  |  ".join(parts) if parts else "unknown"
+            except Exception:
+                count_str = "unknown"
 
-        # Auto-fill class names textbox
-        class_names_text.delete("1.0", "end")
-        class_names_text.insert("1.0", "\n".join(names))
+            def _apply():
+                global train_data_path, roboflow_yaml_path
+                train_data_path    = r_path
+                roboflow_yaml_path = yaml
 
-        # Count images for a friendly status message
-        try:
-            from src.dataset import count_dataset_images
-            counts = count_dataset_images(root_path)
-            parts  = [f"{v} {k}" for k, v in counts.items()]
-            count_str = "  |  ".join(parts) if parts else "unknown"
-        except Exception:
-            count_str = "unknown"
+                _safe_label_configure(train_data_label, text=Path(r_path).name, text_color="#64b5f6")
 
-        status = f"✅  {Path(zip_path).stem}  •  {len(names)} classes  •  {count_str} images"
-        _safe_label_configure(_rf_status_label, text=status, text_color="#4caf50")
+                # Auto-fill class names textbox
+                class_names_text.delete("1.0", "end")
+                class_names_text.insert("1.0", "\n".join(names))
 
-        preview = ", ".join(names[:8]) + ("…" if len(names) > 8 else "")
-        messagebox.showinfo(
-            "Dataset Imported Successfully",
-            f"Roboflow dataset extracted to:\n{root_path}\n\n"
-            f"Classes ({len(names)}): {preview}\n\n"
-            f"Images: {count_str}\n\n"
-            "Class names have been filled in automatically.\n"
-            "Select a model, set epochs/batch, and click Start Training.",
-        )
+                status = f"✅  {Path(zip_path).stem}  •  {len(names)} classes  •  {count_str} images"
+                _safe_label_configure(_rf_status_label, text=status, text_color="#4caf50")
+                _rf_progress_bar.set(1.0)
+                _rf_progress_bar.pack_forget()
+                rf_btn.configure(state="normal", text="📦  Import Roboflow ZIP…")
+
+                preview = ", ".join(names[:8]) + ("…" if len(names) > 8 else "")
+                messagebox.showinfo(
+                    "Dataset Imported Successfully",
+                    f"Roboflow dataset extracted to:\n{r_path}\n\n"
+                    f"Classes ({len(names)}): {preview}\n\n"
+                    f"Images: {count_str}\n\n"
+                    "Class names have been filled in automatically.\n"
+                    "Select a model, set epochs/batch, and click Start Training.",
+                )
+
+            root.after(0, _apply)
+
+        threading.Thread(target=_run_import, daemon=True).start()
 
     def _clear_roboflow():
         global roboflow_yaml_path
@@ -575,6 +686,11 @@ def show_ai_train_window() -> None:
         "The app will extract, patch paths, and fill in class names automatically.",
     )
     _rf_status_label.pack(fill="x", padx=14)
+    # Progress bar for ZIP extraction (hidden until import starts)
+    _rf_progress_bar = ctk.CTkProgressBar(
+        config_panel, progress_color="#64b5f6", mode="determinate",
+    )
+    _rf_progress_bar.set(0)
     ctk.CTkButton(
         config_panel, text="Clear imported dataset", font=("Segoe UI", 11),
         height=28, fg_color="gray50", hover_color="gray35",
@@ -635,23 +751,22 @@ def show_ai_train_window() -> None:
     # ── Task type ──────────────────────────────────────────────────────────
     _lbl("Task Type")
     task_type_var = ctk.StringVar(value="Detection")
-    task_frame = ctk.CTkFrame(config_panel, fg_color="transparent")
-    task_frame.pack(fill="x", **PAD)
-    ctk.CTkRadioButton(
-        task_frame, text="Detection",
-        variable=task_type_var, value="Detection",
-        command=_on_task_type_change, font=FLAB,
-    ).pack(side="left", padx=(0, 24))
-    ctk.CTkRadioButton(
-        task_frame, text="Segmentation",
-        variable=task_type_var, value="Segmentation",
-        command=_on_task_type_change, font=FLAB,
-    ).pack(side="left")
+    task_menu_w = ctk.CTkOptionMenu(
+        config_panel,
+        variable=task_type_var,
+        values=TASK_TYPE_OPTIONS,
+        command=_on_task_type_change,
+        font=FBTN,
+        height=36,
+    )
+    task_menu_w.pack(fill="x", **PAD)
     Tooltip(
-        task_frame,
-        "Detection     – predicts bounding boxes around objects.\n"
-        "Segmentation  – predicts pixel-level instance masks.\n\n"
-        "Segmentation requires polygon annotations in your dataset.",
+        task_menu_w,
+        "Detection         – bounding boxes around objects.\n"
+        "Segmentation      – pixel-level instance masks (polygon annotations required).\n"
+        "Classification    – predict a single class label for the whole image.\n"
+        "Pose Estimation   – detect keypoints / skeleton joints.\n"
+        "OBB Detection     – oriented (rotated) bounding boxes.",
     )
 
     # ── YOLO model dropdown ────────────────────────────────────────────────
@@ -2812,22 +2927,35 @@ def _begin_image_detection() -> None:
         """Called by detect_images after each image is saved – display it immediately."""
         root.after(0, lambda p=result_path: _show_single_result(p))
 
-    threading.Thread(
-        target=detect_images,
-        kwargs=dict(
-            images_folder=detection_images_folder_path,
-            model_path=detection_model_path,
-            callback=_on_detection_complete,
-            progress_callback=_progress_cb,
-            image_result_callback=_image_result_cb,
-            conf_threshold=conf,
-            half=half,
-            workers=workers_val,
-            cancel_flag=lambda: _detection_cancel_flag[0],
-            task=task_val,
-        ),
-        daemon=True,
-    ).start()
+    def _run_detect():
+        """Thread target: run detection and guarantee the UI is always reset."""
+        _completed = [False]
+
+        def _wrapped_callback(results_dir: str) -> None:
+            _completed[0] = True
+            _on_detection_complete(results_dir)
+
+        try:
+            detect_images(
+                images_folder=detection_images_folder_path,
+                model_path=detection_model_path,
+                callback=_wrapped_callback,
+                progress_callback=_progress_cb,
+                image_result_callback=_image_result_cb,
+                conf_threshold=conf,
+                half=half,
+                workers=workers_val,
+                cancel_flag=lambda: _detection_cancel_flag[0],
+                task=task_val,
+            )
+        except Exception as exc:
+            root.after(0, lambda: messagebox.showerror("Detection Error", str(exc)))
+        finally:
+            # If the callback was never called (e.g. error or empty folder), reset UI
+            if not _completed[0]:
+                root.after(0, _show_detection_results)
+
+    threading.Thread(target=_run_detect, daemon=True).start()
 
 
 def _cancel_image_detection() -> None:
@@ -3260,7 +3388,27 @@ ctk.set_default_color_theme("blue")
 screen_w, screen_h = get_screen_size()
 root = ctk.CTk()
 root.title("YOLO Training & Detection Studio")
-root.geometry(f"{screen_w}x{screen_h}")
+
+# Restore saved window size, falling back to full-screen dimensions
+_app_cfg = _load_app_config()
+_win_w = _app_cfg.get("window_width", screen_w)
+_win_h = _app_cfg.get("window_height", screen_h)
+root.geometry(f"{_win_w}x{_win_h}")
+
+
+def _on_app_close() -> None:
+    """Save window size to config then destroy the window."""
+    try:
+        cfg = _load_app_config()
+        cfg["window_width"] = root.winfo_width()
+        cfg["window_height"] = root.winfo_height()
+        _save_app_config(cfg)
+    except Exception:
+        pass
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", _on_app_close)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 SIDEBAR_W = 210
@@ -3337,4 +3485,6 @@ main_frame.pack(fill="both", expand=True)
 # ── Run ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     root.after(100, update_output_textbox)
+    # Load the Train tab by default on startup
+    root.after(200, lambda: on_sidebar_select("Train"))
     root.mainloop()

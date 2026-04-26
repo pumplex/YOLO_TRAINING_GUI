@@ -56,7 +56,7 @@ def parse_names(names_data) -> list:
 #  Roboflow ZIP extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_roboflow_zip(zip_path: str, extract_dir: str) -> tuple:
+def extract_roboflow_zip(zip_path: str, extract_dir: str, progress_callback=None) -> tuple:
     """Extract a Roboflow YOLOv8-format ZIP archive.
 
     Parameters
@@ -64,6 +64,8 @@ def extract_roboflow_zip(zip_path: str, extract_dir: str) -> tuple:
     zip_path   : path to the .zip file to import
     extract_dir: parent directory; a sub-folder named after the zip stem is
                  created inside it (avoids collisions on re-import)
+    progress_callback : optional callable(current: int, total: int, message: str)
+                 called periodically during extraction to report progress.
 
     Returns
     -------
@@ -77,7 +79,7 @@ def extract_roboflow_zip(zip_path: str, extract_dir: str) -> tuple:
     dataset_root = extract_dir / zip_path.stem
     dataset_root.mkdir(parents=True, exist_ok=True)
 
-    _extract_zip(zip_path, dataset_root)
+    _extract_zip(zip_path, dataset_root, progress_callback=progress_callback)
 
     yaml_path = _find_yaml(dataset_root)
     if yaml_path is None:
@@ -95,16 +97,21 @@ def extract_roboflow_zip(zip_path: str, extract_dir: str) -> tuple:
     return str(dataset_root), str(yaml_path), class_names
 
 
-def _extract_zip(zip_path: Path, dest: Path) -> None:
+def _extract_zip(zip_path: Path, dest: Path, progress_callback=None) -> None:
     """Extract the ZIP, writing the first occurrence of data.yaml only.
 
     Roboflow historically embeds data.yaml under multiple sub-paths in the
     same archive, which causes name-collision warnings on extraction.
     We deduplicate by only writing the first data.yaml encountered.
+
+    progress_callback(current: int, total: int, message: str) is called
+    periodically so the caller can update a progress indicator.
     """
     with zipfile.ZipFile(str(zip_path), "r") as zf:
+        members = zf.namelist()
+        total = len(members)
         yaml_written = False
-        for member in zf.namelist():
+        for i, member in enumerate(members):
             is_yaml = Path(member).name.lower() in ("data.yaml", "data.yml")
             if is_yaml:
                 if yaml_written:
@@ -118,6 +125,9 @@ def _extract_zip(zip_path: Path, dest: Path) -> None:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(member) as src, open(str(out_path), "wb") as dst:
                     shutil.copyfileobj(src, dst)
+
+            if progress_callback and (i % 20 == 0 or i == total - 1):
+                progress_callback(i + 1, total, Path(member).name)
 
 
 def _find_yaml(dataset_root: Path):

@@ -273,6 +273,11 @@ def detect_images(
 
     if not image_files and not video_files:
         print("No valid media files found in the directory")
+        if callback:
+            # Create the results dir so _on_detection_complete can scan it
+            empty_results = Path(images_folder) / 'results'
+            empty_results.mkdir(parents=True, exist_ok=True)
+            callback(str(empty_results))
         return
 
     total = len(image_files) + len(video_files)

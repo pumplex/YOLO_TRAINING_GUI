@@ -8,6 +8,20 @@ import mimetypes
 from pathlib import Path
 from ultralytics import YOLO
 
+# ── Centralised models cache ──────────────────────────────────────────────────
+# All pre-trained weights are stored in a "models" folder next to this script's
+# parent directory so they are only downloaded once.
+_SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+_APP_DIR = _SCRIPT_DIR.parent
+_MODELS_DIR = _APP_DIR / "models"
+_MODELS_DIR.mkdir(exist_ok=True)
+
+try:
+    from ultralytics import settings as _ult_settings
+    _ult_settings.update({"weights_dir": str(_MODELS_DIR)})
+except Exception:
+    pass
+
 VALID_IMAGE_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.ppm',
     '.JPG', '.JPEG', '.PNG', '.GIF', '.BMP', '.WEBP', '.TIFF', '.PPM'
@@ -94,9 +108,10 @@ def copy_and_remove_latest_run_files(model_save_path, project_name, task='detect
     """Copy training artefacts from the runs directory to model_save_path."""
     model_save_path = Path(model_save_path)
 
-    # Search the expected task directory first, then fall back to other tasks
+    # Search the expected task directory first, then fall back to all known tasks
     list_of_dirs: list[Path] = []
-    for candidate_task in (task, 'detect', 'segment', 'train'):
+    all_tasks = (task, 'detect', 'segment', 'classify', 'pose', 'obb', 'train')
+    for candidate_task in all_tasks:
         candidate_base = Path('runs') / candidate_task
         if candidate_base.exists():
             list_of_dirs = list(candidate_base.glob(project_name))
@@ -144,6 +159,24 @@ names: [{', '.join(f"'{name}'" for name in class_names)}]
         file.write(yaml_content)
     return yaml_path
 
+def _detect_task(model_type: str, custom_model_path: str = None) -> str:
+    """Determine the Ultralytics task from the model file name / type string."""
+    stem = ""
+    if custom_model_path and os.path.isfile(custom_model_path):
+        stem = Path(custom_model_path).stem.lower()
+    elif model_type:
+        stem = model_type.lower()
+    if "-seg" in stem:
+        return "segment"
+    if "-cls" in stem:
+        return "classify"
+    if "-pose" in stem:
+        return "pose"
+    if "-obb" in stem:
+        return "obb"
+    return "detect"
+
+
 def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
                project_name, custom_model_path=None):
     """Train a YOLO model.
@@ -157,24 +190,20 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # Resolve which weights file to load
+    # Resolve which weights file to load.
+    # Prefer a locally cached copy in the models/ directory.
     if custom_model_path and os.path.isfile(custom_model_path):
         model_file = custom_model_path
         print(f"Using custom base model: {custom_model_path}")
     elif model_type:
-        model_file = f'{model_type}.pt'
+        cached = _MODELS_DIR / f"{model_type}.pt"
+        model_file = str(cached) if cached.exists() else f"{model_type}.pt"
     else:
         raise ValueError("Either model_type or a valid custom_model_path must be provided.")
 
     model = YOLO(model_file).to(device)
 
-    # Determine the Ultralytics task sub-directory used for this run.
-    # Check both the model_type name and the custom model filename so that
-    # segmentation custom models are also detected correctly.
-    seg_hint = (model_type and '-seg' in model_type) or (
-        custom_model_path and '-seg' in Path(custom_model_path).stem
-    )
-    task = 'segment' if seg_hint else 'detect'
+    task = _detect_task(model_type, custom_model_path)
 
     results = model.train(
         data=data_yaml, epochs=epochs, batch=batch,
