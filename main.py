@@ -2741,7 +2741,7 @@ ctk.CTkOptionMenu(
 # Spacer + footer
 ctk.CTkLabel(sidebar, text="").pack(fill="both", expand=True)
 ctk.CTkLabel(
-    sidebar, text="© 2024 SpreadKnowledge", font=("Segoe UI", 9), text_color="#585b70"
+    sidebar, text="© 2026 PumpleX", font=("Segoe UI", 9), text_color="#585b70"
 ).pack(pady=6)
 
 # ── Main frame ─────────────────────────────────────────────────────────────────
