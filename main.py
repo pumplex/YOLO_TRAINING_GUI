@@ -644,6 +644,7 @@ _live_video_task_var      = None    # StringVar  – model task override (for Te
 _live_audio_enabled_var   = None    # BooleanVar – enable audio playback
 _live_audio_sync_var      = None    # BooleanVar – sync audio speed to video FPS
 _live_audio_volume_var    = None    # DoubleVar  – playback volume (0.0–1.0)
+_live_preview_cap_var     = None    # BooleanVar – cap preview to native FPS (buffer mode)
 _live_video_is_url        = [False] # True when source is a URL/stream
 
 # Sidebar settings state (set once when sidebar is built)
@@ -797,6 +798,7 @@ def on_sidebar_select(key: str) -> None:
     global _live_video_pause_btn, _live_video_seek_slider, _live_video_half_var
     global _live_video_conf_var, _live_video_paused
     global _live_audio_enabled_var, _live_audio_sync_var, _live_audio_volume_var
+    global _live_preview_cap_var
     global _train_queue_frame
     global _train_class_names_text, _train_rf_status_label
     global _camera_half_var
@@ -839,6 +841,7 @@ def on_sidebar_select(key: str) -> None:
     _live_audio_enabled_var = None
     _live_audio_sync_var = None
     _live_audio_volume_var = None
+    _live_preview_cap_var = None
     _train_queue_frame = None
     _train_class_names_text = None
     _train_rf_status_label = None
@@ -1723,6 +1726,7 @@ def show_live_video_window() -> None:
     global _live_video_pause_btn, _live_video_seek_slider
     global _live_video_half_var, _live_video_conf_var, _live_video_task_var
     global _live_audio_enabled_var, _live_audio_sync_var, _live_audio_volume_var
+    global _live_preview_cap_var
 
     _live_video_path = ""
     _live_video_cancel_flag[0] = False
@@ -1824,6 +1828,21 @@ def show_live_video_window() -> None:
         "jarring cuts.  Accumulated drift is closed within ~2 frames.\n"
         "Re-enabling Sync seeks audio to the current frame position.\n"
         "Disable to let audio free-run at 1.0× speed.",
+    )
+
+    _live_preview_cap_var = ctk.BooleanVar(value=False)
+    cap_fps_chk = ctk.CTkCheckBox(
+        bar, text="Cap FPS", variable=_live_preview_cap_var, font=FONT,
+    )
+    cap_fps_chk.place(relx=0.555, rely=0.56, relwidth=0.075, relheight=0.38)
+    Tooltip(
+        cap_fps_chk,
+        "Buffer processed frames and display them at the video's native\n"
+        "frame rate, even when YOLO inference finishes faster.\n\n"
+        "This prevents the audio pitch from rising above normal: the\n"
+        "preview builds up a buffer of ready frames and plays them out\n"
+        "at 1× speed, so audio only ever slows down (never speeds up).\n\n"
+        "Takes effect on the next PLAY — restart the video to apply.",
     )
 
     # ── Volume control (placed to the right of the +10s seek button) ──────
@@ -2169,8 +2188,25 @@ def _live_video_thread() -> None:
     video frame position so any drift that built up while sync was off is cleared
     instantly.  ``_pcm_paused`` is managed solely by ``_toggle_pause``; the sync
     path never touches it, so pause/resume works correctly at any point.
+
+    Cap Preview FPS mode
+    --------------------
+    When the "Cap FPS" checkbox is enabled a producer sub-thread runs YOLO
+    inference as fast as the hardware allows and pushes annotated frames into a
+    bounded ``queue.Queue`` (max 16 frames ≈ 96 MB at 1080p).  The main loop
+    becomes a pure consumer: it pulls frames from the queue and throttles
+    display to the video's native frame rate.  Because the consumer always
+    sleeps at least ``frame_delay`` between display updates, the effective
+    display speed is at most 1.0× — audio ``raw_speed`` is clamped to 1.0 so
+    audio pitch never rises above normal.  When inference is slow (queue empty)
+    the consumer stalls, ``raw_speed`` falls below 1.0, and audio slows
+    accordingly.  The net result is a one-sided pitch effect: audio may slow
+    when inference lags, but never speeds up, eliminating the "doppler" flutter
+    heard when inference alternates between fast and slow frames.
     """
     try:
+        import queue as _queue_mod
+
         from ultralytics import YOLO as _YOLO
 
         device = _get_device()
@@ -2206,6 +2242,72 @@ def _live_video_thread() -> None:
         _audio_was_on = False       # track whether audio was active last iteration
         _audio_sync_was_on = False  # track previous value of audio_sync for edge detection
         _ema_speed = 1.0            # EMA of (frame_delay / actual_frame_time); init real-time
+
+        # ── Cap Preview FPS: producer / consumer setup ─────────────────────
+        cap_mode = _live_preview_cap_var is not None and _live_preview_cap_var.get()
+        _prod_seek_ref = [-1]       # consumer writes here; producer reads & acts on it
+
+        if cap_mode:
+            _frame_q: "_queue_mod.Queue[object]" = _queue_mod.Queue(maxsize=16)
+
+            def _run_producer() -> None:
+                """Inference producer: reads + predicts as fast as possible."""
+                prod_fi = 0
+                while not _live_video_cancel_flag[0]:
+                    # ── Honour seek from consumer ──────────────────────────
+                    seek = _prod_seek_ref[0]
+                    if seek >= 0:
+                        prod_fi = max(0, min(seek, total_frames - 1))
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, prod_fi)
+                        _prod_seek_ref[0] = -1
+                        # Drain stale frames from the queue
+                        while True:
+                            try:
+                                _frame_q.get_nowait()
+                            except _queue_mod.Empty:
+                                break
+
+                    # ── Pause: keep the queue from filling while paused ────
+                    if _live_video_paused:
+                        time.sleep(0.05)
+                        continue
+
+                    c = _live_video_conf_var.get() if _live_video_conf_var else 0.5
+                    h = _live_video_half_var.get() if _live_video_half_var else False
+
+                    ret, frm = cap.read()
+                    if not ret:
+                        # End of video: push sentinel; block until consumed
+                        while not _live_video_cancel_flag[0]:
+                            try:
+                                _frame_q.put(None, timeout=0.1)
+                                break
+                            except _queue_mod.Full:
+                                pass
+                        break
+
+                    raw_c = frm.copy()
+                    _live_video_raw_frame[0] = raw_c
+
+                    res = model.predict(
+                        frm, save=False, conf=c, half=h,
+                        device=device if _device_controlled else None,
+                        verbose=False,
+                    )
+                    ann = res[0].plot()
+                    _live_video_ann_frame[0] = ann
+                    det = len(res[0].boxes)
+
+                    # Push to queue; yield if full (consumer is the bottleneck)
+                    while not _live_video_cancel_flag[0]:
+                        try:
+                            _frame_q.put((prod_fi, ann, raw_c, det), timeout=0.1)
+                            break
+                        except _queue_mod.Full:
+                            pass
+                    prod_fi += 1
+
+            threading.Thread(target=_run_producer, daemon=True).start()
 
         while not _live_video_cancel_flag[0]:
             # ── Read per-frame controls (take effect immediately) ──────────
@@ -2272,7 +2374,11 @@ def _live_video_thread() -> None:
             seek_target = _live_video_seek_to[0]
             if seek_target >= 0:
                 frame_idx = max(0, min(seek_target, total_frames - 1))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                if cap_mode:
+                    # Signal the producer to seek; it will drain the queue
+                    _prod_seek_ref[0] = frame_idx
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 _live_video_seek_to[0] = -1
                 # Seek PCM audio to the corresponding position
                 if _pcm_stream is not None:
@@ -2285,38 +2391,66 @@ def _live_video_thread() -> None:
 
             t_start = time.perf_counter()
 
-            ret, frame = cap.read()
-            if not ret:
-                break  # end of video
+            if cap_mode:
+                # ── Consumer: get pre-rendered frame from producer queue ───
+                try:
+                    item = _frame_q.get(timeout=frame_delay + 0.2)
+                except _queue_mod.Empty:
+                    # Producer is behind; update EMA with a slow speed and
+                    # loop so audio adjusts without displaying a stale frame.
+                    wait = time.perf_counter() - t_start
+                    _ema_speed = 0.6 * _ema_speed + 0.4 * (
+                        frame_delay / max(wait, 1e-6)
+                    )
+                    if audio_want and _pcm_stream is not None and audio_sync:
+                        _pcm_speed[0] = max(0.05, _ema_speed)
+                    continue
 
-            # Copy frames for screenshot use
-            _live_video_raw_frame[0] = frame.copy()
+                if item is None:
+                    break  # producer reached end of video
 
-            results = model.predict(
-                frame, save=False, conf=conf, half=half,
-                device=device if _device_controlled else None,
-                verbose=False,
-            )
-            annotated = results[0].plot()
-            _live_video_ann_frame[0] = annotated
+                frame_idx, annotated, raw_frame, det_count = item
+                _live_video_raw_frame[0] = raw_frame
+                _live_video_ann_frame[0] = annotated
+            else:
+                # ── Inline: read frame and run YOLO ───────────────────────
+                ret, frame = cap.read()
+                if not ret:
+                    break  # end of video
+
+                # Copy frames for screenshot use
+                _live_video_raw_frame[0] = frame.copy()
+
+                results = model.predict(
+                    frame, save=False, conf=conf, half=half,
+                    device=device if _device_controlled else None,
+                    verbose=False,
+                )
+                annotated = results[0].plot()
+                _live_video_ann_frame[0] = annotated
+                det_count = len(results[0].boxes)
 
             # Update shared state
             _live_video_frame_ref[0] = frame_idx
             frac = frame_idx / total_frames
 
-            # ── Measure actual elapsed time for this frame ─────────────────
-            t_after_predict = time.perf_counter()
-            frame_proc_time = t_after_predict - t_start
-            # Total display time = max of inference time and fps throttle delay
-            total_frame_time = max(frame_proc_time, frame_delay)
-            actual_fps = 1.0 / max(frame_proc_time, 0.001)  # shown in status bar
+            # ── Throttle to video fps (consumer always sleeps here) ────────
+            # Do this before EMA so total_frame_time reflects a full display
+            # period, not just inference time.
+            elapsed = time.perf_counter() - t_start
+            sleep_t = max(0.001, frame_delay - elapsed)
+            time.sleep(sleep_t)
+
+            # ── Measure actual elapsed time for this display period ────────
+            total_frame_time = time.perf_counter() - t_start
+            actual_fps = 1.0 / max(total_frame_time, 0.001)  # shown in status bar
 
             # ── Smooth audio speed to match actual video throughput ────────
             # EMA of the speed ratio (alpha=0.4 → converges in ~4 frames).
-            # raw_speed is the exact ratio needed for audio to advance at the
-            # same rate as the video; < 1.0 when inference is slower than
-            # real-time.
+            # In cap mode raw_speed is capped at 1.0 so audio never pitches up.
             raw_speed = frame_delay / max(total_frame_time, 1e-6)
+            if cap_mode:
+                raw_speed = min(raw_speed, 1.0)
             _ema_speed = 0.6 * _ema_speed + 0.4 * raw_speed
 
             if audio_want and _pcm_stream is not None:
@@ -2329,13 +2463,14 @@ def _live_video_thread() -> None:
 
                     # Drift correction: close any remaining positional error
                     # within ~2 frames by adjusting speed proportionally.
-                    # Using actual frame time in the denominator makes the
-                    # correction self-scaling across fast and slow hardware.
+                    # In cap mode the upper limit is 1.0 so audio never
+                    # pitches above normal even when correcting lag.
                     expected_sample = int(frame_idx / fps * _PCM_SAMPLE_RATE)
                     drift_secs = (_pcm_pos[0] - expected_sample) / _PCM_SAMPLE_RATE
                     correction = drift_secs / max(2.0 * total_frame_time, 1e-6)
 
-                    _pcm_speed[0] = max(0.05, min(2.0, _ema_speed - correction))
+                    speed_cap = 1.0 if cap_mode else 2.0
+                    _pcm_speed[0] = max(0.05, min(speed_cap, _ema_speed - correction))
                 else:
                     # Sync off: free-run at 1.0×
                     _pcm_speed[0] = 1.0
@@ -2356,7 +2491,6 @@ def _live_video_thread() -> None:
             pil_img = pil_img.resize((nw, nh), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(pil_img)
 
-            det_count = len(results[0].boxes)
             status = (
                 f"Frame {frame_idx}/{total_frames}  ({frac * 100:.0f}%)  "
                 f"|  {det_count} detection(s)  |  {actual_fps:.1f} fps"
@@ -2377,12 +2511,8 @@ def _live_video_thread() -> None:
                         pass
 
             root.after(0, _update)
-            frame_idx += 1
-
-            # Throttle to video fps
-            elapsed = time.perf_counter() - t_start
-            sleep_t = max(0.001, frame_delay - elapsed)
-            time.sleep(sleep_t)
+            if not cap_mode:
+                frame_idx += 1
 
         cap.release()
     except Exception as exc:
