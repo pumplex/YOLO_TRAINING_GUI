@@ -2155,33 +2155,39 @@ def _start_live_video() -> None:
         audio_want = False
 
     if audio_want:
-        _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
-        vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+        audio_sync_now = _live_audio_sync_var is not None and _live_audio_sync_var.get()
+        if not audio_sync_now:
+            # Sync disabled – extract at 1.0× and play immediately (no speed matching).
+            _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
+            vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
 
-        def _extract_and_play():
-            global _live_audio_temp_file, _live_audio_bytes_io
-            file_path, bio = _audio_extract(_live_video_path)
-            if bio is not None:
-                _live_audio_bytes_io = bio
-                _live_audio_speed_ratio[0] = 1.0
-                _live_audio_wall_start[0] = time.time()
-                _audio_play(bio, start_pos=0.0, volume=vol)
-            elif file_path is not None:
-                _live_audio_temp_file = file_path
-                _live_audio_speed_ratio[0] = 1.0
-                _live_audio_wall_start[0] = time.time()
-                _audio_play(file_path, start_pos=0.0, volume=vol)
-            else:
-                root.after(0, lambda: messagebox.showinfo(
-                    "Audio Unavailable",
-                    "Could not extract audio.\n\n"
-                    "Make sure ffmpeg is installed and available on your system PATH:\n"
-                    "  Windows: https://ffmpeg.org/download.html\n"
-                    "  macOS:   brew install ffmpeg\n"
-                    "  Linux:   sudo apt install ffmpeg\n\n"
-                    "Video will play without audio.",
-                ))
-        threading.Thread(target=_extract_and_play, daemon=True).start()
+            def _extract_and_play():
+                global _live_audio_temp_file, _live_audio_bytes_io
+                file_path, bio = _audio_extract(_live_video_path)
+                if bio is not None:
+                    _live_audio_bytes_io = bio
+                    _live_audio_speed_ratio[0] = 1.0
+                    _live_audio_wall_start[0] = time.time()
+                    _audio_play(bio, start_pos=0.0, volume=vol)
+                elif file_path is not None:
+                    _live_audio_temp_file = file_path
+                    _live_audio_speed_ratio[0] = 1.0
+                    _live_audio_wall_start[0] = time.time()
+                    _audio_play(file_path, start_pos=0.0, volume=vol)
+                else:
+                    root.after(0, lambda: messagebox.showinfo(
+                        "Audio Unavailable",
+                        "Could not extract audio.\n\n"
+                        "Make sure ffmpeg is installed and available on your system PATH:\n"
+                        "  Windows: https://ffmpeg.org/download.html\n"
+                        "  macOS:   brew install ffmpeg\n"
+                        "  Linux:   sudo apt install ffmpeg\n\n"
+                        "Video will play without audio.",
+                    ))
+            threading.Thread(target=_extract_and_play, daemon=True).start()
+        # else: sync is ON – the frame thread calibration will measure actual fps,
+        # then extract audio at the correct speed and start playback at the right
+        # position.  Do not start audio here to avoid playing at the wrong speed.
 
     threading.Thread(target=_live_video_thread, daemon=True).start()
 
@@ -2276,31 +2282,34 @@ def _live_video_thread() -> None:
             # ── Handle audio on/off toggled while running ──────────────────
             audio_source = _live_audio_temp_file or _live_audio_bytes_io
             if audio_want and not _audio_was_on and audio_source is None:
-                # User just enabled audio – extract in background (initial speed=1.0;
-                # calibration will re-extract with the correct speed later if needed)
-                vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-                _vid_path = _live_video_path
-                _frame_idx = frame_idx
-
-                def _late_extract(video_path=_vid_path, frame_index=_frame_idx, volume=vol):
-                    global _live_audio_temp_file, _live_audio_bytes_io
-                    file_path, bio = _audio_extract(video_path)
-                    start = frame_index / fps
-                    if bio is not None:
-                        _live_audio_bytes_io = bio
-                        _live_audio_speed_ratio[0] = 1.0
-                        _live_audio_wall_start[0] = time.time() - start
-                        _audio_play(bio, start_pos=start, volume=volume)
-                    elif file_path is not None:
-                        _live_audio_temp_file = file_path
-                        _live_audio_speed_ratio[0] = 1.0
-                        _live_audio_wall_start[0] = time.time() - start
-                        _audio_play(file_path, start_pos=start, volume=volume)
-
-                threading.Thread(target=_late_extract, daemon=True).start()
                 _audio_was_on = True
                 _audio_speed_calibrated = False  # allow recalibration on re-enable
                 _calib_times.clear()
+                if not audio_sync:
+                    # Sync disabled – extract at 1.0× and start immediately.
+                    # Use the live frame position *after* extraction completes so
+                    # we don't seek to a stale position (extraction takes time).
+                    vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+                    _vid_path = _live_video_path
+
+                    def _late_extract(video_path=_vid_path, volume=vol):
+                        global _live_audio_temp_file, _live_audio_bytes_io
+                        file_path, bio = _audio_extract(video_path)
+                        # Read live frame position after extraction finishes
+                        start = _live_video_frame_ref[0] / _live_video_fps_ref[0]
+                        if bio is not None:
+                            _live_audio_bytes_io = bio
+                            _live_audio_speed_ratio[0] = 1.0
+                            _live_audio_wall_start[0] = time.time() - start
+                            _audio_play(bio, start_pos=start, volume=volume)
+                        elif file_path is not None:
+                            _live_audio_temp_file = file_path
+                            _live_audio_speed_ratio[0] = 1.0
+                            _live_audio_wall_start[0] = time.time() - start
+                            _audio_play(file_path, start_pos=start, volume=volume)
+
+                    threading.Thread(target=_late_extract, daemon=True).start()
+                # else: sync is ON – calibration block will extract at measured speed
             elif not audio_want and _audio_was_on:
                 # User just disabled audio
                 _cleanup_live_audio()
@@ -2356,71 +2365,81 @@ def _live_video_thread() -> None:
             actual_fps = 1.0 / max(frame_proc_time, 0.001)
 
             # ── Calibration: collect timing samples ───────────────────────
-            if not _audio_speed_calibrated and frame_idx < _AUDIO_CALIB_FRAMES:
-                _calib_times.append(frame_proc_time)
-
-            # ── After calibration: re-extract audio at correct speed ───────
+            # Collect from the current position whenever calibration is active
+            # (not fixed to frames 0-N) so re-enabled audio also calibrates.
             if (
                 not _audio_speed_calibrated
-                and frame_idx >= _AUDIO_CALIB_FRAMES
-                and _calib_times
+                and audio_want
+                and audio_sync
+                and len(_calib_times) < _AUDIO_CALIB_FRAMES
+            ):
+                _calib_times.append(frame_proc_time)
+
+            # ── After calibration: extract audio at correct speed ─────────
+            if (
+                not _audio_speed_calibrated
+                and len(_calib_times) >= _AUDIO_CALIB_FRAMES
                 and audio_want
                 and audio_sync
             ):
                 avg_proc = sum(_calib_times) / len(_calib_times)
-                # Actual playback fps = 1 / total_time_per_frame including throttle
-                # Use total frame_delay (min of proc_time, 1/fps) as display rate
+                # Total display time per frame accounts for both slow inference
+                # and the fps-throttle sleep; whichever is the bottleneck.
                 avg_display_time = max(avg_proc, frame_delay)
                 measured_fps = 1.0 / avg_display_time
                 speed_ratio = measured_fps / fps   # <1 when inference is slower
 
                 _audio_speed_calibrated = True     # only calibrate once per play session
 
-                # Only re-extract if deviation > 5 % (no-op for fast hardware)
-                if abs(1.0 - speed_ratio) > 0.05:
-                    _audio_src = _live_audio_temp_file or _live_audio_bytes_io
-                    if _audio_src is not None:
-                        _vid_path = _live_video_path
-                        _cur_frame = frame_idx
-                        _vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
-                        # Clamp to a practical range: 0.1 (extreme slow-motion GPU)
-                        # to 10.0 (theoretical super-fast hardware).
-                        _speed = max(0.1, min(10.0, speed_ratio))
+                _audio_src = _live_audio_temp_file or _live_audio_bytes_io
+                audio_already_playing = _audio_src is not None
+                # Re-extract if audio isn't playing yet (sync mode delayed start)
+                # or if the measured speed differs from the current track speed by
+                # more than 5 %.
+                needs_extraction = (
+                    not audio_already_playing
+                    or abs(1.0 - speed_ratio) > 0.05
+                )
 
-                        def _respeed(
-                            video_path=_vid_path,
-                            start_frame=_cur_frame,
-                            sp=_speed,
-                            vol=_vol,
-                        ):
-                            global _live_audio_temp_file, _live_audio_bytes_io
-                            _audio_stop()
-                            # Clean up old temp file before creating new one
-                            old_tmp = _live_audio_temp_file
-                            _live_audio_temp_file = None
-                            _live_audio_bytes_io = None
-                            if old_tmp:
-                                try:
-                                    os.unlink(old_tmp)
-                                except Exception:
-                                    pass
+                if needs_extraction:
+                    _vid_path = _live_video_path
+                    _vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+                    # Clamp to a practical range: 0.1 (extreme slow-motion GPU)
+                    # to 10.0 (theoretical super-fast hardware).
+                    _speed = max(0.1, min(10.0, speed_ratio))
 
-                            file_path, bio = _audio_extract(video_path, speed=sp)
-                            # Audio start position in the *speed-adjusted* track
-                            # corresponds to original_time / speed_ratio
-                            start_pos_adj = _audio_video_time_to_track_pos(start_frame / fps, sp)
-                            if bio is not None:
-                                _live_audio_bytes_io = bio
-                                _live_audio_speed_ratio[0] = sp
-                                _live_audio_wall_start[0] = time.time() - start_pos_adj
-                                _audio_play(bio, start_pos=start_pos_adj, volume=vol)
-                            elif file_path is not None:
-                                _live_audio_temp_file = file_path
-                                _live_audio_speed_ratio[0] = sp
-                                _live_audio_wall_start[0] = time.time() - start_pos_adj
-                                _audio_play(file_path, start_pos=start_pos_adj, volume=vol)
+                    def _respeed(video_path=_vid_path, sp=_speed, vol=_vol):
+                        global _live_audio_temp_file, _live_audio_bytes_io
+                        _audio_stop()
+                        # Clean up old temp file before creating new one
+                        old_tmp = _live_audio_temp_file
+                        _live_audio_temp_file = None
+                        _live_audio_bytes_io = None
+                        if old_tmp:
+                            try:
+                                os.unlink(old_tmp)
+                            except Exception:
+                                pass
 
-                        threading.Thread(target=_respeed, daemon=True).start()
+                        file_path, bio = _audio_extract(video_path, speed=sp)
+                        # Read the LIVE frame position AFTER extraction finishes.
+                        # Extraction can take seconds; using a pre-captured frame
+                        # index would place audio far behind the video.
+                        cur_frame = _live_video_frame_ref[0]
+                        fps_ref = _live_video_fps_ref[0]
+                        start_pos_adj = _audio_video_time_to_track_pos(cur_frame / fps_ref, sp)
+                        if bio is not None:
+                            _live_audio_bytes_io = bio
+                            _live_audio_speed_ratio[0] = sp
+                            _live_audio_wall_start[0] = time.time() - start_pos_adj
+                            _audio_play(bio, start_pos=start_pos_adj, volume=vol)
+                        elif file_path is not None:
+                            _live_audio_temp_file = file_path
+                            _live_audio_speed_ratio[0] = sp
+                            _live_audio_wall_start[0] = time.time() - start_pos_adj
+                            _audio_play(file_path, start_pos=start_pos_adj, volume=vol)
+
+                    threading.Thread(target=_respeed, daemon=True).start()
 
             # ── Periodic hard-resync (safety net for residual drift) ───────
             _audio_src = _live_audio_temp_file or _live_audio_bytes_io
