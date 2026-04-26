@@ -1,6 +1,7 @@
 # version 2.0.0 – benchmark tab, Roboflow ZIP import, segmentation models,
 #                  custom model loader, TensorRT export, tooltips
 
+import io
 import os
 import sys
 import re
@@ -52,6 +53,15 @@ def _save_app_config(data: dict) -> None:
         pass
 from src.camera import CameraDetection
 
+# ── CUDA detection (done once at startup) ─────────────────────────────────────
+try:
+    import torch as _torch
+    _cuda_available = _torch.cuda.is_available()
+    _cuda_device_name = _torch.cuda.get_device_name(0) if _cuda_available else ""
+except Exception:
+    _cuda_available = False
+    _cuda_device_name = ""
+
 # ── ANSI / terminal-escape stripping ──────────────────────────────────────────
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\r')
 
@@ -63,62 +73,138 @@ mimetypes.init()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Temp-file and device helpers
+# ─────────────────────────────────────────────────────────────────────────────
+_TEMP_DIR = _APP_DIR / "temp"
+
+def _get_temp_dir() -> Path | None:
+    """Return the disk temp directory (creating it if needed).
+
+    Returns None when the user has chosen to keep temporary files in RAM
+    (i.e. *_use_ram_temp_var* is True), signalling callers to use in-memory
+    alternatives instead.
+    """
+    if _use_ram_temp_var is not None:
+        try:
+            if _use_ram_temp_var.get():
+                return None  # RAM mode – no disk directory needed
+        except Exception:
+            pass
+    _TEMP_DIR.mkdir(exist_ok=True)
+    return _TEMP_DIR
+
+
+def _get_device() -> str:
+    """Return 'cuda' or 'cpu' based on the user's GPU/CPU toggle.
+
+    Falls back to 'cpu' when CUDA is not available regardless of the toggle.
+    """
+    if _cuda_available and _gpu_device_var is not None:
+        try:
+            if _gpu_device_var.get():
+                return 'cuda'
+        except Exception:
+            pass
+    return 'cpu'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Audio helpers  (Live Video tab)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Named constants for audio extraction and sync
 _AUDIO_EXTRACTION_TIMEOUT_SECS = 120   # max seconds to wait for ffmpeg
 _MIN_AUDIO_FILE_SIZE_BYTES      = 100   # sanity check: file must be non-trivial
-_AUDIO_SYNC_CHECK_INTERVAL      = 75    # frames between sync checks
-_AUDIO_SYNC_THRESHOLD_SECS      = 0.5   # seconds of drift before resyncing
-def _audio_extract_to_temp(video_path: str) -> str | None:
-    """Extract audio track from *video_path* to a temporary MP3 using ffmpeg.
+_AUDIO_SYNC_CHECK_INTERVAL      = 10    # frames between sync checks
+_AUDIO_SYNC_THRESHOLD_SECS      = 0.3   # seconds of drift before resyncing
 
-    Returns the temp-file path on success, None if ffmpeg is unavailable or
-    the video has no audio.
+
+def _audio_extract(video_path: str):
+    """Extract audio track from *video_path* via ffmpeg.
+
+    When the user has enabled RAM mode the audio data is returned as an
+    ``io.BytesIO`` object.  Otherwise the data is written to a file inside
+    the app's ``temp/`` folder.
+
+    Returns
+    -------
+    (file_path, bytes_io)
+        Exactly one of the two values will be non-None depending on the mode.
+        Both are None on failure.
     """
-    import tempfile
-    # Use NamedTemporaryFile to get a unique, collision-safe path
-    with tempfile.NamedTemporaryFile(
-        suffix=".mp3", prefix="yolo_studio_audio_", delete=False
-    ) as _tmp:
-        temp = _tmp.name
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vn", "-acodec", "libmp3lame", "-q:a", "4",
-                temp,
-            ],
-            capture_output=True,
-            timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
-        )
-        if (
-            result.returncode == 0
-            and os.path.exists(temp)
-            and os.path.getsize(temp) > _MIN_AUDIO_FILE_SIZE_BYTES
-        ):
-            return temp
-    except FileNotFoundError:
-        pass  # ffmpeg not on PATH
-    except Exception:
-        pass
-    # Clean up file if extraction failed
-    try:
-        if os.path.exists(temp):
-            os.unlink(temp)
-    except Exception:
-        pass
-    return None
+    use_ram = (_get_temp_dir() is None)
+
+    if use_ram:
+        # Extract directly to stdout pipe – no disk I/O
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+                    "-f", "mp3", "pipe:1",
+                ],
+                capture_output=True,
+                timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
+            )
+            if result.returncode == 0 and len(result.stdout) > _MIN_AUDIO_FILE_SIZE_BYTES:
+                return None, io.BytesIO(result.stdout)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        return None, None
+    else:
+        # Extract to a file in the temp/ directory
+        import tempfile
+        temp_dir = _get_temp_dir()
+        temp_dir.mkdir(exist_ok=True)
+        tmp_fd, temp = tempfile.mkstemp(suffix=".mp3", prefix="yolo_studio_audio_",
+                                        dir=str(temp_dir))
+        os.close(tmp_fd)
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "libmp3lame", "-q:a", "4",
+                    temp,
+                ],
+                capture_output=True,
+                timeout=_AUDIO_EXTRACTION_TIMEOUT_SECS,
+            )
+            if (
+                result.returncode == 0
+                and os.path.exists(temp)
+                and os.path.getsize(temp) > _MIN_AUDIO_FILE_SIZE_BYTES
+            ):
+                return temp, None
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        try:
+            if os.path.exists(temp):
+                os.unlink(temp)
+        except Exception:
+            pass
+        return None, None
 
 
-def _audio_play(audio_file: str, start_pos: float = 0.0) -> bool:
-    """Start pygame audio playback from *start_pos* seconds. Returns True on success."""
+def _audio_play(audio_source, start_pos: float = 0.0, volume: float = 1.0) -> bool:
+    """Start pygame audio playback from *start_pos* seconds.
+
+    *audio_source* may be a file-path string or an ``io.BytesIO`` object.
+    Returns True on success.
+    """
     try:
         import pygame
         if not pygame.mixer.get_init():
             pygame.mixer.init()
-        pygame.mixer.music.load(audio_file)
+        if isinstance(audio_source, io.BytesIO):
+            audio_source.seek(0)
+            pygame.mixer.music.load(audio_source, namehint="audio.mp3")
+        else:
+            pygame.mixer.music.load(audio_source)
+        pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
         pygame.mixer.music.play(start=start_pos)
         return True
     except Exception:
@@ -162,9 +248,19 @@ def _audio_set_pos(pos_seconds: float) -> None:
         pass
 
 
+def _audio_set_volume(volume: float) -> None:
+    """Set pygame music volume (0.0 – 1.0)."""
+    try:
+        import pygame
+        if pygame.mixer.get_init():
+            pygame.mixer.music.set_volume(max(0.0, min(1.0, volume)))
+    except Exception:
+        pass
+
+
 def _cleanup_live_audio() -> None:
-    """Stop audio and remove the temporary audio file."""
-    global _live_audio_temp_file
+    """Stop audio and free any temporary audio resources."""
+    global _live_audio_temp_file, _live_audio_bytes_io
     _audio_stop()
     if _live_audio_temp_file and os.path.exists(_live_audio_temp_file):
         try:
@@ -172,6 +268,7 @@ def _cleanup_live_audio() -> None:
         except Exception:
             pass
     _live_audio_temp_file = None
+    _live_audio_bytes_io = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,9 +613,15 @@ _live_video_conf_var      = None    # DoubleVar  – confidence threshold
 # Live-video audio state
 _live_audio_enabled_var   = None    # BooleanVar – enable audio playback
 _live_audio_sync_var      = None    # BooleanVar – sync audio to video (skip-based)
-_live_audio_temp_file     = None    # path to extracted temp MP3 file
+_live_audio_volume_var    = None    # DoubleVar  – playback volume (0.0–1.0)
+_live_audio_temp_file     = None    # path to extracted temp MP3 file (disk mode)
+_live_audio_bytes_io      = None    # io.BytesIO audio data (RAM mode)
 _live_audio_wall_start    = [0.0]   # wall-clock time when audio pos = 0 (for sync)
 _live_video_is_url        = [False] # True when source is a URL/stream
+
+# Sidebar settings state (set once when sidebar is built)
+_use_ram_temp_var         = None    # BooleanVar – store temp files in RAM
+_gpu_device_var           = None    # BooleanVar – True = use GPU, False = CPU
 
 # Training queue state
 _train_queue              = []          # list of dict with training job configs
@@ -666,7 +769,7 @@ def on_sidebar_select(key: str) -> None:
     global _live_video_label, _live_video_status_label, _live_video_start_btn, _live_video_bar
     global _live_video_pause_btn, _live_video_seek_slider, _live_video_half_var
     global _live_video_conf_var, _live_video_paused
-    global _live_audio_enabled_var, _live_audio_sync_var
+    global _live_audio_enabled_var, _live_audio_sync_var, _live_audio_volume_var
     global _train_queue_frame
     global _train_class_names_text, _train_rf_status_label
     global _camera_half_var
@@ -708,6 +811,7 @@ def on_sidebar_select(key: str) -> None:
     _live_video_paused = False
     _live_audio_enabled_var = None
     _live_audio_sync_var = None
+    _live_audio_volume_var = None
     _train_queue_frame = None
     _train_class_names_text = None
     _train_rf_status_label = None
@@ -1581,7 +1685,7 @@ def show_live_video_window() -> None:
     global _live_video_start_btn, _live_video_bar, detection_model_path
     global _live_video_pause_btn, _live_video_seek_slider
     global _live_video_half_var, _live_video_conf_var
-    global _live_audio_enabled_var, _live_audio_sync_var
+    global _live_audio_enabled_var, _live_audio_sync_var, _live_audio_volume_var
 
     _live_video_path = ""
     _live_video_cancel_flag[0] = False
@@ -1674,13 +1778,33 @@ def show_live_video_window() -> None:
     sync_chk = ctk.CTkCheckBox(
         bar, text="Sync", variable=_live_audio_sync_var, font=FONT,
     )
-    sync_chk.place(relx=0.41, rely=0.64, relwidth=0.08, relheight=0.30)
+    sync_chk.place(relx=0.41, rely=0.64, relwidth=0.065, relheight=0.30)
     Tooltip(
         sync_chk,
         "Periodically re-synchronise audio to the current video frame.\n"
-        "Uses time-skipping: if audio falls more than 0.5 s behind the\n"
+        "Uses time-skipping: if audio drifts more than 0.3 s behind the\n"
         "video, it seeks forward to match.  Recommended to leave on.",
     )
+
+    # ── Volume control ─────────────────────────────────────────────────────
+    _live_audio_volume_var = ctk.DoubleVar(value=1.0)
+    vol_lbl = ctk.CTkLabel(bar, text="Vol:", font=FONT, anchor="w")
+    vol_lbl.place(relx=0.478, rely=0.64, relwidth=0.04, relheight=0.30)
+    vol_slider = ctk.CTkSlider(
+        bar, from_=0.0, to=1.0, variable=_live_audio_volume_var,
+        number_of_steps=20, width=60,
+    )
+    vol_slider.place(relx=0.518, rely=0.68, relwidth=0.075, relheight=0.25)
+    vol_val_lbl = ctk.CTkLabel(bar, text="100%", font=FONT, anchor="w")
+    vol_val_lbl.place(relx=0.595, rely=0.64, relwidth=0.04, relheight=0.30)
+
+    def _on_volume_change(*_):
+        v = _live_audio_volume_var.get()
+        vol_val_lbl.configure(text=f"{int(v * 100)}%")
+        _audio_set_volume(v)
+
+    _live_audio_volume_var.trace_add("write", _on_volume_change)
+    Tooltip(vol_slider, "Audio playback volume (0 – 100%).")
 
     # ── Buttons (right half) ───────────────────────────────────────────────
     def _pick_video():
@@ -1895,7 +2019,7 @@ def show_live_video_window() -> None:
 
 def _start_live_video() -> None:
     global _live_video_running, _live_video_cancel_flag, _live_video_paused
-    global _live_audio_temp_file
+    global _live_audio_temp_file, _live_audio_bytes_io
 
     if not _live_video_path:
         messagebox.showerror("Error", "Please select a video file first.")
@@ -1934,14 +2058,19 @@ def _start_live_video() -> None:
 
     if audio_want:
         _safe_label_configure(_live_video_status_label, text="⏳ Extracting audio…", text_color="#64b5f6")
-        # Extract audio in a short background task before starting the main thread
+        vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+
         def _extract_and_play():
-            global _live_audio_temp_file
-            temp = _audio_extract_to_temp(_live_video_path)
-            if temp:
-                _live_audio_temp_file = temp
+            global _live_audio_temp_file, _live_audio_bytes_io
+            file_path, bio = _audio_extract(_live_video_path)
+            if bio is not None:
+                _live_audio_bytes_io = bio
                 _live_audio_wall_start[0] = time.time()
-                _audio_play(temp, start_pos=0.0)
+                _audio_play(bio, start_pos=0.0, volume=vol)
+            elif file_path is not None:
+                _live_audio_temp_file = file_path
+                _live_audio_wall_start[0] = time.time()
+                _audio_play(file_path, start_pos=0.0, volume=vol)
             else:
                 root.after(0, lambda: messagebox.showinfo(
                     "Audio Unavailable",
@@ -1982,11 +2111,9 @@ def _live_video_thread() -> None:
     try:
         from ultralytics import YOLO as _YOLO
 
-        half = _live_video_half_var.get() if _live_video_half_var else False
-        conf = _live_video_conf_var.get() if _live_video_conf_var else 0.5
-        audio_sync = _live_audio_sync_var and _live_audio_sync_var.get()
-
+        device = _get_device()
         model = _YOLO(detection_model_path)
+        model.to(device)
 
         cap = cv2.VideoCapture(_live_video_path)
         if not cap.isOpened():
@@ -2001,8 +2128,49 @@ def _live_video_thread() -> None:
 
         frame_delay = max(0.001, 1.0 / fps)
         frame_idx = 0
+        _audio_was_on = False  # track whether audio was playing last iteration
 
         while not _live_video_cancel_flag[0]:
+            # ── Read per-frame controls (take effect immediately) ──────────
+            half = _live_video_half_var.get() if _live_video_half_var else False
+            conf = _live_video_conf_var.get() if _live_video_conf_var else 0.5
+            audio_want = (
+                not _live_video_is_url[0]
+                and _live_audio_enabled_var is not None
+                and _live_audio_enabled_var.get()
+            )
+            audio_sync = _live_audio_sync_var is not None and _live_audio_sync_var.get()
+
+            # ── Handle audio on/off toggled while running ──────────────────
+            audio_source = _live_audio_temp_file or _live_audio_bytes_io
+            if audio_want and not _audio_was_on and audio_source is None:
+                # User just enabled audio – extract in background
+                vol = _live_audio_volume_var.get() if _live_audio_volume_var else 1.0
+                _vid_path = _live_video_path
+                _frame_idx = frame_idx
+
+                def _late_extract(video_path=_vid_path, frame_index=_frame_idx, volume=vol):
+                    global _live_audio_temp_file, _live_audio_bytes_io
+                    file_path, bio = _audio_extract(video_path)
+                    start = frame_index / fps
+                    if bio is not None:
+                        _live_audio_bytes_io = bio
+                        _live_audio_wall_start[0] = time.time() - start
+                        _audio_play(bio, start_pos=start, volume=volume)
+                    elif file_path is not None:
+                        _live_audio_temp_file = file_path
+                        _live_audio_wall_start[0] = time.time() - start
+                        _audio_play(file_path, start_pos=start, volume=volume)
+
+                threading.Thread(target=_late_extract, daemon=True).start()
+                _audio_was_on = True
+            elif not audio_want and _audio_was_on:
+                # User just disabled audio
+                _cleanup_live_audio()
+                _audio_was_on = False
+            elif audio_want:
+                _audio_was_on = True
+
             # ── Handle pending seek ────────────────────────────────────────
             seek_target = _live_video_seek_to[0]
             if seek_target >= 0:
@@ -2010,7 +2178,8 @@ def _live_video_thread() -> None:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                 _live_video_seek_to[0] = -1
                 # Seek audio to match video position
-                if _live_audio_temp_file:
+                _audio_src = _live_audio_temp_file or _live_audio_bytes_io
+                if _audio_src:
                     new_audio_pos = frame_idx / fps
                     _audio_set_pos(new_audio_pos)
                     _live_audio_wall_start[0] = time.time() - new_audio_pos
@@ -2026,25 +2195,30 @@ def _live_video_thread() -> None:
             if not ret:
                 break  # end of video
 
-            # Copy frames for screenshot use: the UI thread may read these at any
-            # time, so we must not hand over a reference that the loop will mutate.
+            # Copy frames for screenshot use
             _live_video_raw_frame[0] = frame.copy()
 
-            results = model.predict(frame, save=False, conf=conf, half=half, verbose=False)
+            results = model.predict(frame, save=False, conf=conf, half=half,
+                                    device=device, verbose=False)
             annotated = results[0].plot()
-            _live_video_ann_frame[0] = annotated  # .plot() already returns a new array
+            _live_video_ann_frame[0] = annotated
 
             # Update shared state
             _live_video_frame_ref[0] = frame_idx
             frac = frame_idx / total_frames
 
+            # ── Measure actual elapsed time for this frame ─────────────────
+            t_after_predict = time.perf_counter()
+            frame_proc_time = t_after_predict - t_start
+            actual_fps = 1.0 / max(frame_proc_time, 0.001)
+
             # ── Periodic audio sync (skip-based) ──────────────────────────
-            if audio_sync and _live_audio_temp_file and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0 and frame_idx > 0:
+            _audio_src = _live_audio_temp_file or _live_audio_bytes_io
+            if audio_sync and _audio_src and frame_idx % _AUDIO_SYNC_CHECK_INTERVAL == 0 and frame_idx > 0:
                 video_time = frame_idx / fps
-                elapsed = time.time() - _live_audio_wall_start[0]
-                drift = video_time - elapsed
+                elapsed_wall = time.time() - _live_audio_wall_start[0]
+                drift = video_time - elapsed_wall
                 if abs(drift) > _AUDIO_SYNC_THRESHOLD_SECS:
-                    # Audio is drifting — re-sync to video position
                     _audio_set_pos(video_time)
                     _live_audio_wall_start[0] = time.time() - video_time
 
@@ -2065,7 +2239,7 @@ def _live_video_thread() -> None:
             det_count = len(results[0].boxes)
             status = (
                 f"Frame {frame_idx}/{total_frames}  ({frac * 100:.0f}%)  "
-                f"|  {det_count} detection(s)"
+                f"|  {det_count} detection(s)  |  {actual_fps:.1f} fps"
             )
 
             def _update(ph=photo, st=status, f=frac):
@@ -2076,7 +2250,6 @@ def _live_video_thread() -> None:
                     except Exception:
                         pass
                 _safe_label_configure(_live_video_status_label, text=st)
-                # Update seek slider without triggering seek command
                 if _live_video_seek_slider and not _live_video_seeking[0]:
                     try:
                         _live_video_seek_slider.set(f)
@@ -3345,6 +3518,7 @@ def _begin_image_detection() -> None:
                 workers=workers_val,
                 cancel_flag=lambda: _detection_cancel_flag[0],
                 task=task_val,
+                device=_get_device(),
             )
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror("Detection Error", str(exc)))
@@ -3740,7 +3914,7 @@ def start_camera_detection() -> None:
 
     try:
         half = _camera_half_var.get() if _camera_half_var else False
-        camera_detection = CameraDetection(detection_model_path, half=half)
+        camera_detection = CameraDetection(detection_model_path, half=half, device=_get_device())
         camera_detection.start_camera(camera_id)
         if detection_save_dir:
             camera_detection.set_save_directory(detection_save_dir)
@@ -3796,12 +3970,21 @@ root.geometry(f"{_win_w}x{_win_h}")
 
 
 def _on_app_close() -> None:
-    """Save window size to config then destroy the window."""
+    """Save window size to config, clean up temp files, then destroy the window."""
     try:
         cfg = _load_app_config()
         cfg["window_width"] = root.winfo_width()
         cfg["window_height"] = root.winfo_height()
         _save_app_config(cfg)
+    except Exception:
+        pass
+    # Stop audio and remove any leftover temp audio file
+    _cleanup_live_audio()
+    # Remove the disk temp directory if it exists and is empty or was created by us
+    try:
+        import shutil as _shutil
+        if _TEMP_DIR.exists():
+            _shutil.rmtree(str(_TEMP_DIR), ignore_errors=True)
     except Exception:
         pass
     root.destroy()
@@ -3869,7 +4052,90 @@ ctk.CTkOptionMenu(
     command=ctk.set_appearance_mode,
     font=("Segoe UI", 11),
     height=30,
-).pack(fill="x", padx=10, pady=(2, 8))
+).pack(fill="x", padx=10, pady=(2, 4))
+
+ctk.CTkFrame(sidebar, height=1, fg_color="#45475a").pack(fill="x", padx=10, pady=(4, 4))
+
+# ── Settings section ──────────────────────────────────────────────────────────
+ctk.CTkLabel(
+    sidebar, text="Settings", font=("Segoe UI", 11, "bold"), text_color="#a6adc8"
+).pack(padx=10, pady=(2, 2), anchor="w")
+
+_use_ram_temp_var = ctk.BooleanVar(value=True)
+_ram_chk = ctk.CTkCheckBox(
+    sidebar,
+    text="Save temp files to RAM",
+    variable=_use_ram_temp_var,
+    font=("Segoe UI", 10),
+)
+_ram_chk.pack(fill="x", padx=10, pady=(2, 4))
+Tooltip(
+    _ram_chk,
+    "When enabled, temporary files (such as extracted audio) are kept in memory\n"
+    "rather than written to disk.  Faster and leaves no disk footprint.\n\n"
+    "When disabled, all temporary files are stored in a 'temp/' folder next to\n"
+    "the application and are cleaned up automatically.",
+)
+
+ctk.CTkFrame(sidebar, height=1, fg_color="#45475a").pack(fill="x", padx=10, pady=(4, 4))
+
+# ── CUDA / GPU section ────────────────────────────────────────────────────────
+ctk.CTkLabel(
+    sidebar, text="Hardware", font=("Segoe UI", 11, "bold"), text_color="#a6adc8"
+).pack(padx=10, pady=(2, 2), anchor="w")
+
+if _cuda_available:
+    _cuda_label_text = f"CUDA ✅  Enabled"
+    _cuda_label_color = "#4caf50"
+    _cuda_detail = _cuda_device_name if _cuda_device_name else "GPU detected"
+else:
+    _cuda_label_text = "CUDA ❌  Not Detected"
+    _cuda_label_color = "#ef5350"
+    _cuda_detail = "CPU only"
+
+ctk.CTkLabel(
+    sidebar, text=_cuda_label_text,
+    font=("Segoe UI", 10, "bold"), text_color=_cuda_label_color,
+).pack(padx=10, anchor="w")
+ctk.CTkLabel(
+    sidebar, text=_cuda_detail,
+    font=("Segoe UI", 9), text_color="#6c7086",
+    wraplength=180,
+).pack(padx=10, pady=(0, 4), anchor="w")
+
+_gpu_device_var = ctk.BooleanVar(value=_cuda_available)  # default GPU when available
+
+def _on_gpu_toggle():
+    use_gpu = _gpu_device_var.get() and _cuda_available
+    _gpu_toggle_lbl.configure(text="GPU" if use_gpu else "CPU")
+
+_gpu_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+_gpu_row.pack(fill="x", padx=10, pady=(0, 4))
+ctk.CTkLabel(_gpu_row, text="CPU", font=("Segoe UI", 10)).pack(side="left")
+_gpu_switch = ctk.CTkSwitch(
+    _gpu_row,
+    text="",
+    variable=_gpu_device_var,
+    command=_on_gpu_toggle,
+    state="normal" if _cuda_available else "disabled",
+    width=44,
+    height=22,
+)
+_gpu_switch.pack(side="left", padx=4)
+_gpu_toggle_lbl = ctk.CTkLabel(
+    _gpu_row,
+    text="GPU" if _cuda_available else "CPU",
+    font=("Segoe UI", 10),
+    text_color="#4caf50" if _cuda_available else "#6c7086",
+)
+_gpu_toggle_lbl.pack(side="left")
+Tooltip(
+    _gpu_switch,
+    "Switch between GPU (CUDA) and CPU inference.\n\n"
+    "GPU is faster but requires a CUDA-capable NVIDIA graphics card.\n"
+    "CPU mode always works but will be slower on large models.\n\n"
+    f"{'CUDA is detected and ready.' if _cuda_available else 'CUDA is not available — CPU only.'}",
+)
 
 # Spacer + footer
 ctk.CTkLabel(sidebar, text="").pack(fill="both", expand=True)

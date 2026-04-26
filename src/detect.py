@@ -86,6 +86,7 @@ def process_video(
     progress_callback: Optional[Callable] = None,
     cancel_flag: Optional[Callable] = None,
     half: bool = False,
+    device: Optional[str] = None,
 ):
     """Process a video file and save detection results.
 
@@ -141,7 +142,8 @@ def process_video(
                 )
 
         # Detect objects in frame
-        results = model.predict(frame, save=False, conf=conf_threshold, half=half, verbose=False)
+        results = model.predict(frame, save=False, conf=conf_threshold, half=half, verbose=False,
+                                **({"device": device} if device is not None else {}))
 
         # Only process frames with detections above threshold
         if len(results[0].boxes) > 0:
@@ -248,6 +250,7 @@ def detect_images(
     workers: int = 4,
     cancel_flag: Optional[Callable] = None,
     task: Optional[str] = None,
+    device: Optional[str] = None,
 ):
     """Run YOLO detection on all images/videos in a folder.
 
@@ -265,6 +268,9 @@ def detect_images(
         Required for exported formats such as TensorRT (.engine) or ONNX (.onnx)
         that do not embed task metadata.  When None the task is inferred
         automatically (works for .pt files but may fail for exported formats).
+    device
+        Inference device string such as 'cuda' or 'cpu'.  When None the
+        default Ultralytics device selection is used.
     """
     model = YOLO(model_path, task=task)
 
@@ -295,6 +301,7 @@ def detect_images(
         model.predict(
             str(img_path), save=True, save_txt=True, imgsz=640,
             conf=conf_threshold, half=half, workers=workers, verbose=False,
+            **({"device": device} if device is not None else {}),
         )
         latest_run_dir = _find_latest_predict_run()
         if latest_run_dir:
@@ -337,6 +344,7 @@ def detect_images(
             progress_callback=_vid_cb,
             cancel_flag=cancel_flag,
             half=half,
+            device=device,
         )
         current += 1
         if progress_callback:
