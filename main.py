@@ -2686,8 +2686,14 @@ def show_benchmark_window() -> None:
 
     def _add_models():
         paths = filedialog.askopenfilenames(
-            title="Select YOLO model(s)",
-            filetypes=[("PyTorch model", "*.pt"), ("All files", "*.*")],
+            title="Select model file(s)",
+            filetypes=[
+                ("Model files", "*.pt *.onnx *.engine *.trt"),
+                ("PyTorch model", "*.pt"),
+                ("ONNX model", "*.onnx"),
+                ("TensorRT engine", "*.engine *.trt"),
+                ("All files", "*.*"),
+            ],
         )
         for p in paths:
             p = normalize_path(p)
@@ -2699,19 +2705,56 @@ def show_benchmark_window() -> None:
     add_btn.pack(fill="x", **PAD)
     Tooltip(
         add_btn,
-        "Add one or more trained .pt model files to compare.\n"
+        "Add one or more model files to compare.\n"
+        "Supported formats: PyTorch (.pt), ONNX (.onnx), TensorRT (.engine / .trt).\n"
         "You can benchmark as many models as you like side-by-side.",
     )
     _sep()
 
-    # ── Dataset YAML ──────────────────────────────────────────────────────
-    _lbl("Dataset YAML")
-    _yaml_ref = [""]  # mutable container captured by closure
+    # ── Dataset source ────────────────────────────────────────────────────
+    _lbl("Dataset Source")
+    _yaml_ref   = [""]   # mutable container – YAML path
+    _folder_ref = [""]   # mutable container – folder path
 
     yaml_lbl = ctk.CTkLabel(
         setup, text="No YAML selected", font=("Segoe UI", 11),
         text_color="gray", anchor="w",
     )
+    folder_lbl = ctk.CTkLabel(
+        setup, text="No folder selected", font=("Segoe UI", 11),
+        text_color="gray", anchor="w",
+    )
+
+    # Split radio-button widgets – created further below, referenced here
+    split_var   = ctk.StringVar(value="val")
+    _split_btns: dict = {}  # keyed by split value string
+
+    def _apply_split_availability(splits: dict, data_source: str) -> None:
+        """Enable/disable split radio buttons and auto-select the best one."""
+        mapping = {
+            "test":   splits.get("test",  False),
+            "val":    splits.get("valid", False),
+            "train":  splits.get("train", False),
+            "folder": data_source == "folder" and (
+                splits.get("flat", False) or splits.get("base", False)
+            ),
+        }
+        enabled = []
+        for val, ok in mapping.items():
+            btn = _split_btns.get(val)
+            if btn is None:
+                continue
+            btn.configure(state="normal" if ok else "disabled")
+            if ok:
+                enabled.append(val)
+
+        # Auto-select in preference order: test > val > train > folder
+        current = split_var.get()
+        if current not in enabled:
+            for pref in ("test", "val", "train", "folder"):
+                if pref in enabled:
+                    split_var.set(pref)
+                    break
 
     def _select_yaml():
         p = normalize_path(
@@ -2720,20 +2763,65 @@ def show_benchmark_window() -> None:
                 filetypes=[("YAML files", "*.yaml *.yml"), ("All files", "*.*")],
             )
         )
-        if p:
-            _yaml_ref[0] = p
-            yaml_lbl.configure(text=Path(p).name, text_color="#4caf50")
+        if not p:
+            return
+        _yaml_ref[0]   = p
+        _folder_ref[0] = ""
+        yaml_lbl.configure(text=Path(p).name, text_color="#4caf50")
+        folder_lbl.configure(text="No folder selected", text_color="gray")
+        splits = _detect_yaml_dataset_splits(p)
+        _apply_split_availability(splits, "yaml")
+
+    def _select_folder():
+        p = normalize_path(filedialog.askdirectory(title="Select dataset folder"))
+        if not p:
+            return
+        splits = _detect_folder_splits(Path(p))
+        if not any(splits.values()):
+            messagebox.showwarning(
+                "No Valid Dataset Found",
+                "No valid file or folder structure was found in the selected folder.\n\n"
+                "Expected one of:\n"
+                "  •  test/images/  +  test/labels/\n"
+                "  •  valid/images/ +  valid/labels/\n"
+                "  •  train/images/ +  train/labels/\n"
+                "  •  images/  +  labels/  (flat structure)\n"
+                "  •  Image and matching .txt label files directly in the folder",
+            )
+            return
+        _folder_ref[0] = p
+        _yaml_ref[0]   = ""
+        folder_lbl.configure(text=Path(p).name, text_color="#4caf50")
+        yaml_lbl.configure(text="No YAML selected", text_color="gray")
+        _apply_split_availability(splits, "folder")
 
     yaml_btn = ctk.CTkButton(setup, text="Browse YAML…", font=FBTN, height=36, command=_select_yaml)
     yaml_btn.pack(fill="x", **PAD)
     Tooltip(
         yaml_btn,
         "Select the data.yaml for your dataset.\n\n"
-        "This YAML tells YOLO where your validation / test images and labels are.\n"
+        "This YAML tells YOLO where your images and labels are.\n"
         "Roboflow-exported datasets include data.yaml in the ZIP root.\n\n"
-        "The same YAML can be used to compare multiple models.",
+        "After selecting, only the splits that physically exist on disk are enabled.",
     )
     yaml_lbl.pack(fill="x", padx=14)
+
+    folder_btn = ctk.CTkButton(
+        setup, text="Browse Folder…", font=FBTN, height=36, command=_select_folder,
+    )
+    folder_btn.pack(fill="x", **PAD)
+    Tooltip(
+        folder_btn,
+        "Select a folder that contains your dataset images and labels.\n\n"
+        "Supported structures (checked in this order):\n"
+        "  1.  test/images/   +  test/labels/\n"
+        "  2.  valid/images/  +  valid/labels/\n"
+        "  3.  train/images/  +  train/labels/\n"
+        "  4.  images/        +  labels/  (flat)\n"
+        "  5.  Image + .txt files directly in the folder\n\n"
+        "The Evaluate On controls below are updated automatically.",
+    )
+    folder_lbl.pack(fill="x", padx=14)
     _sep()
 
     # ── Image size ────────────────────────────────────────────────────────
@@ -2749,19 +2837,40 @@ def show_benchmark_window() -> None:
 
     # ── Split selector ────────────────────────────────────────────────────
     _lbl("Evaluate On")
-    split_var = ctk.StringVar(value="val")
     split_frame = ctk.CTkFrame(setup, fg_color="transparent")
     split_frame.pack(fill="x", **PAD)
-    for _txt, _val in [("Validation set", "val"), ("Test set", "test")]:
-        ctk.CTkRadioButton(
-            split_frame, text=_txt, variable=split_var, value=_val, font=FLAB,
-        ).pack(side="left", padx=(0, 20))
-    Tooltip(
-        split_frame,
-        "Validation set  – the val split used during training (always available).\n"
-        "Test set        – a held-out set never seen during training.\n"
-        "                  Only available if your dataset has a 'test' split.",
-    )
+
+    _split_defs = [
+        ("Test set",    "test",
+         "Test set – a held-out split never seen during training.\n"
+         "Only available if your dataset has a 'test' folder."),
+        ("Valid set",   "val",
+         "Valid set – the validation split used while training.\n"
+         "Typically always present."),
+        ("Train set",   "train",
+         "Train set – the training images.\n"
+         "Useful to check in-sample performance (expected to be high)."),
+        ("Folder set",  "folder",
+         "Folder set – use images from the selected folder directly\n"
+         "(flat images/ + labels/ structure, or files in the root).\n"
+         "Only available when a folder is selected via Browse Folder."),
+    ]
+
+    row1 = ctk.CTkFrame(split_frame, fg_color="transparent")
+    row1.pack(fill="x")
+    row2 = ctk.CTkFrame(split_frame, fg_color="transparent")
+    row2.pack(fill="x")
+
+    for idx, (_txt, _val, _tip) in enumerate(_split_defs):
+        parent = row1 if idx < 2 else row2
+        rb = ctk.CTkRadioButton(
+            parent, text=_txt, variable=split_var, value=_val, font=FLAB,
+            state="disabled",
+        )
+        rb.pack(side="left", padx=(0, 16), pady=2)
+        Tooltip(rb, _tip)
+        _split_btns[_val] = rb
+
     _sep()
 
     # ── Run button ────────────────────────────────────────────────────────
@@ -2771,7 +2880,7 @@ def show_benchmark_window() -> None:
         fg_color="#1565c0", hover_color="#0d47a1",
         font=("Segoe UI", 15, "bold"), height=50,
         text_color="white", corner_radius=8,
-        command=lambda: _start_benchmark(img_size_entry, split_var, _yaml_ref),
+        command=lambda: _start_benchmark(img_size_entry, split_var, _yaml_ref, _folder_ref),
     )
     _benchmark_run_btn.pack(fill="x", padx=14, pady=12)
 
@@ -2792,7 +2901,7 @@ def _show_benchmark_placeholder() -> None:
     ctk.CTkLabel(
         _benchmark_results_frame,
         text=(
-            "Add your trained models and a dataset YAML on the left,\n"
+            "Add your trained models and a dataset source on the left,\n"
             "then click  ▶ Run Benchmark  to compare them side-by-side.\n\n"
             "Results will show accuracy, speed, and model size —\n"
             "top performers highlighted in green / blue."
@@ -2803,17 +2912,19 @@ def _show_benchmark_placeholder() -> None:
     ).pack(pady=4)
 
 
-def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
+def _start_benchmark(img_size_entry, split_var, yaml_ref, folder_ref) -> None:
     global _benchmark_results_frame, _benchmark_run_btn
 
-    yaml_path = yaml_ref[0]
+    yaml_path    = yaml_ref[0]
+    folder_path  = folder_ref[0]
     img_size_str = img_size_entry.get().strip() or "640"
+    split_ui     = split_var.get()   # 'test' | 'val' | 'train' | 'folder'
 
     errors = []
     if not _benchmark_models:
         errors.append("• Please add at least one model.")
-    if not yaml_path:
-        errors.append("• Please select a dataset YAML file.")
+    if not yaml_path and not folder_path:
+        errors.append("• Please select a dataset YAML file or a dataset folder.")
     if not img_size_str.isdigit() or int(img_size_str) < 1:
         errors.append("• Image Size must be a positive integer (e.g. 640).")
     if errors:
@@ -2821,7 +2932,9 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
         return
 
     img_size   = int(img_size_str)
-    split      = split_var.get()
+    # Map UI split choice to the string passed to model.val(split=...)
+    yolo_split = split_ui if split_ui != "folder" else "val"
+
     models_run = list(_benchmark_models)
     total_m    = len(models_run)
 
@@ -2879,26 +2992,53 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
         return msg
 
     def run_all():
+        import tempfile, os as _os
         from ultralytics import YOLO
         all_metrics = []
+        _tmp_yamls: list[str] = []   # temp files to clean up after all runs
+
         for i, mp in enumerate(models_run):
             _log(f"\n[{i + 1}/{total_m}]  Evaluating:  {Path(mp).name}\n")
             _set_progress(i)
             try:
-                model  = YOLO(mp)
+                model = YOLO(mp)
 
-                # Pre-flight: check class count compatibility
-                yaml_nc = _get_yaml_nc(yaml_path)
-                model_nc = len(model.names) if hasattr(model, "names") else None
-                if yaml_nc is not None and model_nc is not None and model_nc != yaml_nc:
-                    raise ValueError(
-                        f"Class count mismatch: model has {model_nc} classes but "
-                        f"dataset YAML declares {yaml_nc} classes.  "
-                        "Benchmark skipped for this model."
+                if folder_path:
+                    # ── Folder-based benchmark ──────────────────────────
+                    root_p = Path(folder_path)
+                    available = _detect_folder_splits(root_p)
+
+                    model_nc    = len(model.names) if hasattr(model, "names") else 80
+                    model_names = list(model.names.values()) if hasattr(model, "names") else []
+
+                    effective_yaml = _build_folder_benchmark_yaml(
+                        root_p, split_ui, available, model_nc, model_names,
                     )
+                    if effective_yaml is None:
+                        raise RuntimeError(
+                            "Could not determine a valid image path from the selected folder.\n"
+                            "Ensure images and labels are present in a supported structure."
+                        )
+                    _tmp_yamls.append(effective_yaml)
+                    _log(f"  Using folder dataset: {folder_path}\n")
+                else:
+                    # ── YAML-based benchmark ────────────────────────────
+                    effective_yaml = yaml_path
+                    # Pre-flight: check class count compatibility (PT models only)
+                    if mp.lower().endswith(".pt"):
+                        yaml_nc   = _get_yaml_nc(effective_yaml)
+                        model_nc  = len(model.names) if hasattr(model, "names") else None
+                        if yaml_nc is not None and model_nc is not None and model_nc != yaml_nc:
+                            raise ValueError(
+                                f"Class count mismatch: model has {model_nc} classes but "
+                                f"dataset YAML declares {yaml_nc} classes.  "
+                                "Benchmark skipped for this model."
+                            )
 
-                result = model.val(data=yaml_path, imgsz=img_size, split=split, verbose=False)
-                m      = _extract_bench_metrics(mp, result)
+                result = model.val(
+                    data=effective_yaml, imgsz=img_size, split=yolo_split, verbose=False,
+                )
+                m = _extract_bench_metrics(mp, result)
                 all_metrics.append(m)
                 _log(
                     f"  mAP50={m['map50']:.3f}  mAP50-95={m['map']:.3f}  "
@@ -2907,15 +3047,28 @@ def _start_benchmark(img_size_entry, split_var, yaml_ref) -> None:
             except Exception as exc:
                 friendly = _classify_error(exc)
                 _log(f"  ❌  Error: {friendly}\n")
+                try:
+                    sz = Path(mp).stat().st_size / 1_048_576
+                except Exception:
+                    sz = 0.0
                 all_metrics.append({
                     "name": Path(mp).name, "path": mp,
                     "map50": None, "map": None,
                     "precision": None, "recall": None,
                     "speed_ms": None,
-                    "size_mb": Path(mp).stat().st_size / 1_048_576,
+                    "size_mb": sz,
                     "error": str(exc),
                 })
+
         _set_progress(total_m)
+
+        # Clean up temporary YAML files generated for folder mode
+        for tmp_yaml in _tmp_yamls:
+            try:
+                _os.unlink(tmp_yaml)
+            except Exception:
+                pass
+
         root.after(0, lambda: _finish_benchmark(all_metrics, bench_bar))
 
     threading.Thread(target=run_all, daemon=True).start()
@@ -2934,6 +3087,150 @@ def _get_yaml_nc(yaml_path: str) -> int | None:
     except Exception:
         pass
     return None
+
+
+_BENCH_IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+
+
+def _detect_folder_splits(root: Path) -> dict:
+    """Return a dict indicating which dataset splits exist under *root*.
+
+    Keys returned:
+      'test'   – ROOT/test/images/ + ROOT/test/labels/ both exist and contain files
+      'valid'  – ROOT/valid/images/ + ROOT/valid/labels/ both exist and contain files
+      'train'  – ROOT/train/images/ + ROOT/train/labels/ both exist and contain files
+      'flat'   – ROOT/images/ + ROOT/labels/ both exist and contain files
+      'base'   – image + matching .txt files sit directly inside ROOT/
+    """
+
+    def _has_images(d: Path) -> bool:
+        try:
+            return d.is_dir() and any(
+                f.suffix.lower() in _BENCH_IMG_EXTS for f in d.iterdir() if f.is_file()
+            )
+        except Exception:
+            return False
+
+    result: dict = {}
+
+    for split_name in ("test", "valid", "train"):
+        img_dir = root / split_name / "images"
+        lbl_dir = root / split_name / "labels"
+        result[split_name] = _has_images(img_dir) and lbl_dir.is_dir()
+
+    flat_img = root / "images"
+    flat_lbl = root / "labels"
+    result["flat"] = _has_images(flat_img) and flat_lbl.is_dir()
+
+    try:
+        result["base"] = any(
+            f.is_file()
+            and f.suffix.lower() in _BENCH_IMG_EXTS
+            and (root / (f.stem + ".txt")).exists()
+            for f in root.iterdir()
+        )
+    except Exception:
+        result["base"] = False
+
+    return result
+
+
+def _detect_yaml_dataset_splits(yaml_path: str) -> dict:
+    """Detect which splits physically exist on disk for a given YAML file.
+
+    Reads the YAML's *path* key (or uses the YAML's parent directory as the
+    dataset root) then checks for the standard folder structures.
+
+    Returns the same shape as :func:`_detect_folder_splits` but without
+    'flat' and 'base' keys (YAML mode doesn't support those).
+    """
+    try:
+        import yaml as _yaml
+        with open(yaml_path, "r", encoding="utf-8") as fh:
+            data = _yaml.safe_load(fh) or {}
+
+        yaml_dir = Path(yaml_path).parent
+        path_val = data.get("path", "")
+        if path_val:
+            root = Path(path_val)
+            if not root.is_absolute():
+                root = (yaml_dir / root).resolve()
+        else:
+            root = yaml_dir
+
+        # Fall back to yaml_dir when 'path' doesn't point to an existing dir
+        if not root.is_dir():
+            root = yaml_dir
+
+        splits = _detect_folder_splits(root)
+        return {k: splits.get(k, False) for k in ("test", "valid", "train")}
+    except Exception:
+        return {"test": False, "valid": True, "train": True}
+
+
+def _build_folder_benchmark_yaml(
+    root: Path,
+    split_ui: str,
+    available_splits: dict,
+    nc: int,
+    names: list,
+) -> str | None:
+    """Create a temporary YAML file so Ultralytics can evaluate a plain folder.
+
+    *split_ui* is the value from the split StringVar: 'test', 'val', 'train',
+    or 'folder' (meaning the flat/base directory structure).
+
+    Returns the path to the temporary YAML file, or *None* if no valid
+    image path could be determined.
+    """
+    import tempfile
+    import yaml as _yaml
+
+    def _abs(p: Path) -> str:
+        return str(p).replace("\\", "/")
+
+    data: dict = {
+        "path": _abs(root),
+        "nc": nc,
+        "names": names,
+    }
+
+    # Map each YOLO key to its resolved image folder (if available)
+    for yolo_key, folder_name in [("train", "train"), ("val", "valid"), ("test", "test")]:
+        if available_splits.get(folder_name):
+            data[yolo_key] = _abs(root / folder_name / "images")
+
+    # "Folder set" – flat images/ structure or raw base directory
+    if split_ui == "folder":
+        if available_splits.get("flat"):
+            flat_path = _abs(root / "images")
+            if "val" not in data:
+                data["val"] = flat_path
+            if "train" not in data:
+                data["train"] = flat_path
+        elif available_splits.get("base"):
+            base_path = _abs(root)
+            if "val" not in data:
+                data["val"] = base_path
+            if "train" not in data:
+                data["train"] = base_path
+
+    # YOLO requires at least a 'val' key
+    if "val" not in data:
+        for fallback in ("train", "test"):
+            if fallback in data:
+                data["val"] = data[fallback]
+                break
+        else:
+            return None  # no usable images found
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+        prefix="yolo_bench_",
+    )
+    _yaml.dump(data, tmp, allow_unicode=True, sort_keys=False)
+    tmp.close()
+    return tmp.name
 
 
 def _bench_append_log(textbox, msg: str) -> None:
