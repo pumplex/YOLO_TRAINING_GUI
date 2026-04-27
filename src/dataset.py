@@ -194,8 +194,8 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path, output_path: Path = None) -
         # dataset_root / yaml_dir (Roboflow exports often use ../split/images
         # but the actual files are at dataset_root/split/images after extraction).
         parts = p.parts
-        if parts and parts[0] == "..":
-            stripped = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+        if parts and parts[0] == ".." and len(parts) > 1:
+            stripped = Path(*parts[1:])
             for base in (dataset_root, yaml_dir):
                 candidate = (base / stripped).resolve()
                 if candidate.exists():

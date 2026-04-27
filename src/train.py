@@ -240,7 +240,7 @@ def _find_split_images_dir(root: Path, aliases: list) -> Path | None:
     """Return the first *root/alias/images* directory that exists and has files."""
     for alias in aliases:
         p = root / alias / 'images'
-        if p.is_dir() and any(True for _ in p.iterdir()):
+        if p.is_dir() and any(p.iterdir()):
             return p
     return None
 
