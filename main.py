@@ -6,6 +6,7 @@ import sys
 import re
 import time
 import json
+import shutil
 import cv2
 import customtkinter as ctk
 import tkinter as tk
@@ -67,6 +68,14 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\r')
 def _strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences and carriage-return characters."""
     return _ANSI_RE.sub('', text)
+
+# ── Epoch progress regex ───────────────────────────────────────────────────────
+_EPOCH_RE = re.compile(r'^\s*(\d+)/(\d+)\s')
+
+def _match_epoch(raw_line: str, stripped_line: str):
+    """Return an epoch regex match from raw or stripped line, or None."""
+    m = _EPOCH_RE.match(raw_line)
+    return m if m else _EPOCH_RE.match(stripped_line)
 
 mimetypes.init()
 
@@ -1293,8 +1302,8 @@ def show_ai_train_window() -> None:
                 cur = float(initial_val) if is_float else int(initial_val)
             nv = cur + delta * step
             if is_float:
-                # Round to avoid floating-point noise
-                nv = round(nv, 10)
+                # Round to 6 decimal places to avoid floating-point noise, display as 4 sig figs
+                nv = round(nv, 6)
                 var.set(f"{nv:.4g}")
             else:
                 var.set(str(int(nv)))
@@ -4155,7 +4164,6 @@ def _check_and_offer_resume(project_name: str, epochs_val: str, extra_params: di
 
     epochs_done_msg = ""
     try:
-        import torch as _torch
         ckpt = _torch.load(str(last_pt), map_location="cpu", weights_only=False)
         epoch_done = ckpt.get("epoch", None)
         if epoch_done is not None:
@@ -4183,8 +4191,7 @@ def _check_and_offer_resume(project_name: str, epochs_val: str, extra_params: di
         try:
             _TEMP_DIR.mkdir(exist_ok=True)
             temp_last = _TEMP_DIR / f"resume_{project_name}_last.pt"
-            import shutil as _shutil
-            _shutil.copy2(str(last_pt), str(temp_last))
+            shutil.copy2(str(last_pt), str(temp_last))
             extra_params = dict(extra_params)
             extra_params['resume'] = True
             output_queue.put(f"⏩ Resuming training from checkpoint: {last_pt}\n")
@@ -4234,8 +4241,7 @@ def _run_training_subprocess(
     _train_progress_value = 0.0
     _train_progress_text  = ""
 
-    import json as _json
-    extra_json = _json.dumps(extra_params or {})
+    extra_json = json.dumps(extra_params or {})
 
     cmd = [
         sys.executable, "src/train.py",
@@ -4253,7 +4259,7 @@ def _run_training_subprocess(
     ]
 
     # Pattern: lines like "      1/100  " at the start
-    epoch_re = re.compile(r'^\s*(\d+)/(\d+)\s')
+    # (defined at module level as _EPOCH_RE; _match_epoch handles both raw and stripped)
 
     def _update_train_progress(current_ep: int, total_ep: int) -> None:
         global _train_progress_value, _train_progress_text
@@ -4303,9 +4309,7 @@ def _run_training_subprocess(
                 # Skip lines that were purely escape sequences
                 if line.strip():
                     output_queue.put(line)
-                m = epoch_re.match(raw_line)
-                if not m:
-                    m = epoch_re.match(line)
+                m = _match_epoch(raw_line, line)
                 if m:
                     ep_cur = int(m.group(1))
                     ep_tot = int(m.group(2))
@@ -4739,7 +4743,6 @@ def _run_training_queue() -> None:
                         output_queue.put(f"❌ Failed to create YAML: {exc}\n")
                         continue
 
-                import json as _json
                 _extra = job.get("extra_params", {})
                 cmd = [
                     sys.executable, "src/train.py",
@@ -4753,9 +4756,9 @@ def _run_training_queue() -> None:
                     yaml_path,
                     str(batch_size),
                     custom_model_path,
-                    _json.dumps(_extra),
+                    json.dumps(_extra),
                 ]
-                epoch_re = re.compile(r'^\s*(\d+)/(\d+)\s')
+                epoch_re = _EPOCH_RE
 
                 proc = subprocess.Popen(
                     cmd,
@@ -4764,9 +4767,10 @@ def _run_training_queue() -> None:
                 )
                 for raw_line in iter(proc.stdout.readline, ""):
                     line = _strip_ansi(raw_line)
+                    line = line.lstrip()
                     if line.strip():
                         output_queue.put(line)
-                    m = epoch_re.match(line)
+                    m = _match_epoch(raw_line, line)
                     if m:
                         ep_cur, ep_tot = int(m.group(1)), int(m.group(2))
                         root.after(0, lambda c=ep_cur, t=ep_tot: _update_queue_bar(c, t, qi, len(jobs)))
