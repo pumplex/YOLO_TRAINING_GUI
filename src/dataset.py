@@ -140,7 +140,7 @@ def _find_yaml(dataset_root: Path):
     return candidates[0] if candidates else None
 
 
-def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
+def _patch_yaml(yaml_path: Path, dataset_root: Path, output_path: Path = None) -> Path:
     """Rewrite data.yaml so Ultralytics can find the dataset from any CWD.
 
     Changes made:
@@ -150,6 +150,17 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
     * top-level 'path' key set to dataset_root
     * val/valid paths that cannot be resolved fall back to the train split
     * test path that cannot be resolved is removed
+
+    Parameters
+    ----------
+    yaml_path    : source YAML file to read
+    dataset_root : root directory of the dataset (used for path resolution)
+    output_path  : if given, write the patched YAML here instead of overwriting
+                   *yaml_path*.  The original file is left untouched.
+
+    Returns
+    -------
+    The Path that was written (either *output_path* or *yaml_path*).
     """
     data = _load_yaml(yaml_path)
 
@@ -161,7 +172,16 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
     yaml_dir = yaml_path.parent
 
     def _resolve(value: str) -> str | None:
-        """Return an absolute path string if *value* resolves to an existing path, else None."""
+        """Return an absolute path string if *value* resolves to an existing path, else None.
+
+        Handles three forms:
+        1. Absolute path – tested as-is.
+        2. Relative path – tested relative to dataset_root then yaml_dir.
+        3. Path starting with '../' – the leading '../' segment is stripped and
+           the remainder is tested relative to dataset_root / yaml_dir.  This
+           covers Roboflow exports where data.yaml uses ``../train/images`` but
+           the extracted files sit at ``dataset_root/train/images``.
+        """
         p = Path(value)
         if p.is_absolute():
             return str(p).replace("\\", "/") if p.exists() else None
@@ -170,6 +190,16 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
             candidate = (base / value).resolve()
             if candidate.exists():
                 return str(candidate).replace("\\", "/")
+        # For paths starting with '../', also try the remainder relative to
+        # dataset_root / yaml_dir (Roboflow exports often use ../split/images
+        # but the actual files are at dataset_root/split/images after extraction).
+        parts = p.parts
+        if parts and parts[0] == "..":
+            stripped = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+            for base in (dataset_root, yaml_dir):
+                candidate = (base / stripped).resolve()
+                if candidate.exists():
+                    return str(candidate).replace("\\", "/")
         return None
 
     # Resolve relative path values to absolute
@@ -190,7 +220,8 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
     # Determine resolved train path to use as a fallback for missing splits
     train_resolved = _resolve(str(data["train"])) if data.get("train") else None
 
-    # val/valid: if the path still does not exist on disk, fall back to train
+    # val/valid: if the path still does not exist on disk, fall back to train.
+    # The 'val' key must never be removed – Ultralytics requires it.
     for key in ("val", "valid"):
         if key not in data:
             continue
@@ -205,15 +236,18 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
                 )
                 data[key] = train_resolved
             else:
+                # Keep the original value rather than removing 'val'.
+                # Ultralytics will produce a clear error if the path is still
+                # wrong, which is better than the cryptic "'val' key missing"
+                # error caused by removing the key entirely.
                 warnings.warn(
-                    f"'{key}' path '{current}' not found and no train fallback is available. "
-                    f"Removing '{key}' from the dataset configuration.",
+                    f"'{key}' path '{current}' not found and no train fallback "
+                    "is available. Keeping the original value.",
                     UserWarning,
                     stacklevel=2,
                 )
-                del data[key]
 
-    # test: remove entirely if the path does not exist
+    # test: remove entirely if the path does not exist (test is optional)
     if "test" in data:
         current = str(data["test"])
         if not Path(current).exists():
@@ -225,7 +259,9 @@ def _patch_yaml(yaml_path: Path, dataset_root: Path) -> None:
             )
             del data["test"]
 
-    _write_yaml(yaml_path, data)
+    write_to = output_path if output_path is not None else yaml_path
+    _write_yaml(write_to, data)
+    return write_to
 
 
 # ─────────────────────────────────────────────────────────────────────────────

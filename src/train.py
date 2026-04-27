@@ -236,15 +236,40 @@ def copy_and_remove_latest_run_files(model_save_path, project_name, task='detect
     if runs_dir.exists() and runs_dir.is_dir():
         shutil.rmtree(str(runs_dir))
 
+def _find_split_images_dir(root: Path, aliases: list) -> Path | None:
+    """Return the first *root/alias/images* directory that exists and has files."""
+    for alias in aliases:
+        p = root / alias / 'images'
+        if p.is_dir() and any(True for _ in p.iterdir()):
+            return p
+    return None
+
+
 def create_yaml(project_name, train_data_path, class_names, save_directory):
-    prepare_data(train_data_path)
+    root = Path(train_data_path)
 
-    train_path = str(Path(train_data_path) / 'train')
-    val_path = str(Path(train_data_path) / 'val')
+    _TRAIN_ALIASES = ['train', 'Train', 'TRAIN']
+    _VAL_ALIASES   = ['val', 'Val', 'VAL', 'valid', 'Valid', 'VALID',
+                      'validation', 'Validation', 'VALIDATION']
 
-    # Ensure proper path format for YAML
-    train_path = train_path.replace('\\', '/')
-    val_path = val_path.replace('\\', '/')
+    train_img = _find_split_images_dir(root, _TRAIN_ALIASES)
+    val_img   = _find_split_images_dir(root, _VAL_ALIASES)
+
+    if train_img is not None and val_img is not None:
+        # Both splits already exist – use them directly without moving any files.
+        train_path = str(train_img).replace('\\', '/')
+        val_path   = str(val_img).replace('\\', '/')
+    elif train_img is not None and val_img is None:
+        # Train split exists but no val split – create a val split from train.
+        prepare_data(train_data_path)
+        train_path = str(root / 'train').replace('\\', '/')
+        val_path   = str(root / 'val').replace('\\', '/')
+    else:
+        # No recognisable split layout – fall back to the full prepare_data flow
+        # (handles flat images/ + labels/ and co-located image/txt pairs).
+        prepare_data(train_data_path)
+        train_path = str(root / 'train').replace('\\', '/')
+        val_path   = str(root / 'val').replace('\\', '/')
 
     yaml_content = f"""train: {train_path}
 val: {val_path}

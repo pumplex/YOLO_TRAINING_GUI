@@ -306,8 +306,9 @@ def _cleanup_live_audio() -> None:
 def _auto_load_training_yaml(folder_path: str) -> None:
     """Search *folder_path* for data.yaml and, if found, auto-fill the Train tab.
 
-    Sets roboflow_yaml_path, patches the YAML to use absolute paths, and
-    populates the class-names textbox (if visible).
+    Sets roboflow_yaml_path, patches the YAML to use absolute paths (writing
+    the result to *data_training.yaml* so the original *data.yaml* is never
+    modified), and populates the class-names textbox (if visible).
     """
     global roboflow_yaml_path
     try:
@@ -326,9 +327,11 @@ def _auto_load_training_yaml(folder_path: str) -> None:
         if not names:
             return
 
-        # Patch YAML to use absolute paths so training works from any CWD
-        _patch_yaml(yaml_path, folder)
-        roboflow_yaml_path = str(yaml_path)
+        # Patch YAML to use absolute paths, writing to a *copy* so the
+        # original data.yaml is never modified.
+        patched_path = folder / "data_training.yaml"
+        _patch_yaml(yaml_path, folder, output_path=patched_path)
+        roboflow_yaml_path = str(patched_path)
 
         # Update class-names textbox if the Train tab is currently open
         if _train_class_names_text is not None:
@@ -357,7 +360,8 @@ def _auto_load_training_yaml(folder_path: str) -> None:
             f"Classes ({len(names)}): "
             f"{', '.join(names[:8])}{'…' if len(names) > 8 else ''}\n\n"
             "Class names have been filled in automatically.\n"
-            "The dataset YAML will be used directly for training.",
+            "A patched copy (data_training.yaml) has been created for training.\n"
+            "The original data.yaml has not been modified.",
         )
     except Exception:
         pass  # silently skip – manual entry still works
