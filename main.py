@@ -380,38 +380,116 @@ def _auto_load_training_yaml(folder_path: str) -> None:
 #  Tooltip helper
 # ─────────────────────────────────────────────────────────────────────────────
 class Tooltip:
-    """Show a brief help tip when the user hovers over any tk/ctk widget."""
+    """Show a brief help tip when the user hovers over any tk/ctk widget.
+
+    • 500 ms hover delay before appearing (prevents flicker on mouse-over).
+    • Smooth fade-in over ~120 ms.
+    • Rounded corners via CTkFrame.
+    • Smart positioning: stays within the screen and flips above the widget
+      when there is not enough space below.
+    """
+
+    _DELAY_MS   = 500   # ms to wait before showing
+    _FADE_STEPS = 10    # alpha steps during fade-in
+    _FADE_MS    = 12    # ms between alpha steps  (~120 ms total)
 
     def __init__(self, widget, text: str) -> None:
-        self.widget = widget
-        self.text = text
-        self._tip = None
-        widget.bind("<Enter>", self._show)
+        self.widget    = widget
+        self.text      = text
+        self._tip      = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule)
         widget.bind("<Leave>", self._hide)
 
+    # ── scheduling ──────────────────────────────────────────────────────────
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self._DELAY_MS, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    # ── appearance ──────────────────────────────────────────────────────────
+
     def _show(self, _event=None) -> None:
+        if self._tip:
+            return
         try:
-            x = self.widget.winfo_rootx() + 24
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            wx = self.widget.winfo_rootx()
+            wy = self.widget.winfo_rooty()
+            wh = self.widget.winfo_height()
+            sw = self.widget.winfo_screenwidth()
+            sh = self.widget.winfo_screenheight()
         except Exception:
             return
-        self._tip = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        tk.Label(
-            tw,
+
+        # "#010101" acts as the transparent cut-out on Windows, giving true
+        # rounded corners. On other platforms it becomes the invisible window
+        # background that is obscured by the CTkFrame.
+        _TRANSP = "#010101"
+
+        tip = tk.Toplevel(self.widget)
+        self._tip = tip
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=_TRANSP)
+        try:
+            tip.wm_attributes("-transparentcolor", _TRANSP)
+        except Exception:
+            pass
+        tip.wm_attributes("-alpha", 0.0)
+
+        container = ctk.CTkFrame(
+            tip,
+            corner_radius=8,
+            fg_color="#2e2e2e",
+            border_width=1,
+            border_color="#555555",
+        )
+        container.pack(padx=0, pady=0)
+        ctk.CTkLabel(
+            container,
             text=self.text,
-            justify=tk.LEFT,
-            background="#ffffc0",
-            relief=tk.SOLID,
-            borderwidth=1,
-            font=("Segoe UI", 10),
+            justify="left",
+            font=("Segoe UI", 11),
             wraplength=360,
-            padx=7,
-            pady=5,
-        ).pack()
+            text_color="#e8e8e8",
+            fg_color="transparent",
+        ).pack(padx=10, pady=7)
+
+        # Measure the popup, then clamp it inside the screen.
+        tip.update_idletasks()
+        tw = tip.winfo_reqwidth()
+        th = tip.winfo_reqheight()
+
+        x = wx + 4
+        y = wy + wh + 4
+        if y + th > sh - 8:          # not enough room below → flip above
+            y = wy - th - 4
+        y = max(8, y)
+        x = max(8, min(x, sw - tw - 8))
+
+        tip.wm_geometry(f"+{x}+{y}")
+        self._fade_in(tip, 0)
+
+    def _fade_in(self, tip, step: int) -> None:
+        if self._tip is not tip:
+            return
+        alpha = min(1.0, (step + 1) / self._FADE_STEPS)
+        try:
+            tip.wm_attributes("-alpha", alpha)
+        except Exception:
+            return
+        if step + 1 < self._FADE_STEPS:
+            self.widget.after(self._FADE_MS, lambda: self._fade_in(tip, step + 1))
 
     def _hide(self, _event=None) -> None:
+        self._cancel()
         if self._tip:
             self._tip.destroy()
             self._tip = None
@@ -1336,13 +1414,15 @@ def show_ai_train_window() -> None:
         "Set to 0 to disable (use epochs instead).")
 
     # Patience spinbox
-    _lbl("Patience (early-stop epochs)")
+    _lbl_patience = _lbl("Patience (early-stop epochs)")
     _patience_row, _train_patience_var = _make_spinbox(config_panel, 100)
     _patience_row.pack(fill="x", **PAD)
-    Tooltip(_patience_row,
+    _PATIENCE_TIP = (
         "Number of epochs to wait without improvement in validation metrics\n"
         "before early stopping the training. Helps prevent overfitting by\n"
         "stopping training when performance plateaus.")
+    Tooltip(_lbl_patience, _PATIENCE_TIP)
+    Tooltip(_patience_row, _PATIENCE_TIP)
 
     # Save toggle and Save Period spinbox on same row
     _save_row = ctk.CTkFrame(config_panel, fg_color="transparent")
@@ -1357,9 +1437,11 @@ def show_ai_train_window() -> None:
     _lbl_sp.pack(side="left")
     _sp_frame, _train_save_period_var = _make_spinbox(_save_row, -1, width=70)
     _sp_frame.pack(side="left", padx=(4, 0))
-    Tooltip(_sp_frame,
+    _SP_TIP = (
         "Frequency of saving model checkpoints (epochs). -1 = disabled.\n"
         "Useful for saving interim models during long training sessions.")
+    Tooltip(_lbl_sp,  _SP_TIP)
+    Tooltip(_sp_frame, _SP_TIP)
 
     # Cache toggle
     _cache_row = ctk.CTkFrame(config_panel, fg_color="transparent")
@@ -1373,45 +1455,58 @@ def show_ai_train_window() -> None:
         "at the cost of increased memory usage.")
 
     # Freeze spinbox
-    _lbl("Freeze Layers (0 = disabled)")
+    _lbl_freeze = _lbl("Freeze Layers (0 = disabled)")
     _freeze_row, _train_freeze_var = _make_spinbox(config_panel, 0)
     _freeze_row.pack(fill="x", **PAD)
-    Tooltip(_freeze_row,
+    _FREEZE_TIP = (
         "Freezes the first N layers of the model, reducing the number of\n"
         "trainable parameters. Useful for fine-tuning or transfer learning.\n"
         "Set to 0 to disable.")
+    Tooltip(_lbl_freeze, _FREEZE_TIP)
+    Tooltip(_freeze_row, _FREEZE_TIP)
 
     # Learning rates row
     _lr_row = ctk.CTkFrame(config_panel, fg_color="transparent")
     _lr_row.pack(fill="x", **PAD)
-    ctk.CTkLabel(_lr_row, text="Initial LR (lr0):", font=("Segoe UI", 12), anchor="w").pack(side="left")
+    _lbl_lr0 = ctk.CTkLabel(_lr_row, text="Initial LR (lr0):", font=("Segoe UI", 12), anchor="w")
+    _lbl_lr0.pack(side="left")
     _lr0_frame, _train_lr0_var = _make_spinbox(_lr_row, 0.01, step=0.001, is_float=True, width=70)
     _lr0_frame.pack(side="left", padx=(4, 12))
-    Tooltip(_lr0_frame,
+    _LR0_TIP = (
         "Initial learning rate (e.g. SGD=1E-2, Adam=1E-3). Adjusting this value\n"
         "is crucial for the optimization process, influencing how rapidly model\n"
         "weights are updated.")
-    ctk.CTkLabel(_lr_row, text="Final LR (lrf):", font=("Segoe UI", 12), anchor="w").pack(side="left")
+    Tooltip(_lbl_lr0,   _LR0_TIP)
+    Tooltip(_lr0_frame, _LR0_TIP)
+    _lbl_lrf = ctk.CTkLabel(_lr_row, text="Final LR (lrf):", font=("Segoe UI", 12), anchor="w")
+    _lbl_lrf.pack(side="left")
     _lrf_frame, _train_lrf_var = _make_spinbox(_lr_row, 0.01, step=0.001, is_float=True, width=70)
     _lrf_frame.pack(side="left", padx=(4, 0))
-    Tooltip(_lrf_frame,
+    _LRF_TIP = (
         "Final learning rate as a fraction of the initial rate = (lr0 * lrf),\n"
         "used in conjunction with schedulers to adjust the learning rate over time.")
+    Tooltip(_lbl_lrf,   _LRF_TIP)
+    Tooltip(_lrf_frame, _LRF_TIP)
 
     # Momentum and Weight Decay row
     _mom_row = ctk.CTkFrame(config_panel, fg_color="transparent")
     _mom_row.pack(fill="x", **PAD)
-    ctk.CTkLabel(_mom_row, text="Momentum:", font=("Segoe UI", 12), anchor="w").pack(side="left")
+    _lbl_mom = ctk.CTkLabel(_mom_row, text="Momentum:", font=("Segoe UI", 12), anchor="w")
+    _lbl_mom.pack(side="left")
     _mom_frame, _train_momentum_var = _make_spinbox(_mom_row, 0.937, step=0.01, is_float=True, width=70)
     _mom_frame.pack(side="left", padx=(4, 12))
-    Tooltip(_mom_frame,
+    _MOM_TIP = (
         "Momentum factor for SGD or beta1 for Adam optimizers, influencing\n"
         "the incorporation of past gradients in the current update.")
-    ctk.CTkLabel(_mom_row, text="Weight Decay:", font=("Segoe UI", 12), anchor="w").pack(side="left")
+    Tooltip(_lbl_mom,   _MOM_TIP)
+    Tooltip(_mom_frame, _MOM_TIP)
+    _lbl_wd = ctk.CTkLabel(_mom_row, text="Weight Decay:", font=("Segoe UI", 12), anchor="w")
+    _lbl_wd.pack(side="left")
     _wd_frame, _train_weight_decay_var = _make_spinbox(_mom_row, 0.0005, step=0.0001, is_float=True, width=70)
     _wd_frame.pack(side="left", padx=(4, 0))
-    Tooltip(_wd_frame,
-        "L2 regularization term, penalizing large weights to prevent overfitting.")
+    _WD_TIP = "L2 regularization term, penalizing large weights to prevent overfitting."
+    Tooltip(_lbl_wd,   _WD_TIP)
+    Tooltip(_wd_frame, _WD_TIP)
 
     # Optimizer dropdown
     _lbl("Optimizer")
@@ -1441,9 +1536,11 @@ def show_ai_train_window() -> None:
     _md_frame, _train_max_det_var = _make_spinbox(_val_row, 300, width=70)
     _md_frame.pack(side="left", padx=(4, 0))
     _train_max_det_widget = _md_frame
-    Tooltip(_md_frame,
+    _MD_TIP = (
         "Specifies the maximum number of objects retained during the validation\n"
         "phase of training. Only applicable when Validation is enabled.")
+    Tooltip(_lbl_md,   _MD_TIP)
+    Tooltip(_md_frame, _MD_TIP)
     def _on_val_change(*_):
         state = "normal" if _train_val_var.get() else "disabled"
         for child in _md_frame.winfo_children():
