@@ -7,6 +7,7 @@ import random
 import mimetypes
 from pathlib import Path
 from ultralytics import YOLO
+import json
 
 # ── Centralised models cache ──────────────────────────────────────────────────
 # All pre-trained weights are stored in a "models" folder next to this script's
@@ -303,7 +304,7 @@ def _detect_task(model_type: str, custom_model_path: str = None) -> str:
 
 
 def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
-               project_name, custom_model_path=None):
+               project_name, custom_model_path=None, extra_params=None):
     """Train a YOLO model.
 
     Parameters
@@ -330,10 +331,104 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
 
     task = _detect_task(model_type, custom_model_path)
 
-    results = model.train(
+    ep = extra_params or {}
+
+    train_kwargs = dict(
         data=data_yaml, epochs=epochs, batch=batch,
-        imgsz=img_size, name=project_name, save=True,
+        imgsz=img_size, name=project_name,
     )
+
+    # workers
+    w = ep.get('workers')
+    if w is not None:
+        train_kwargs['workers'] = int(w)
+
+    # save (default True)
+    train_kwargs['save'] = bool(ep.get('save', True))
+
+    # time (0 = disabled / not passed)
+    t = ep.get('time', 0)
+    try:
+        if t and float(t) > 0:
+            train_kwargs['time'] = float(t)
+    except (ValueError, TypeError):
+        pass
+
+    # patience
+    if 'patience' in ep:
+        try:
+            train_kwargs['patience'] = int(ep['patience'])
+        except (ValueError, TypeError):
+            pass
+
+    # save_period (-1 = disabled by default)
+    if 'save_period' in ep:
+        try:
+            train_kwargs['save_period'] = int(ep['save_period'])
+        except (ValueError, TypeError):
+            pass
+
+    # cache
+    if 'cache' in ep:
+        train_kwargs['cache'] = bool(ep['cache'])
+
+    # resume
+    if ep.get('resume', False):
+        train_kwargs['resume'] = True
+
+    # freeze (0 or negative = disabled)
+    try:
+        freeze = int(ep.get('freeze', 0))
+        if freeze > 0:
+            train_kwargs['freeze'] = freeze
+    except (ValueError, TypeError):
+        pass
+
+    # lr0
+    if 'lr0' in ep:
+        try:
+            train_kwargs['lr0'] = float(ep['lr0'])
+        except (ValueError, TypeError):
+            pass
+
+    # lrf
+    if 'lrf' in ep:
+        try:
+            train_kwargs['lrf'] = float(ep['lrf'])
+        except (ValueError, TypeError):
+            pass
+
+    # momentum
+    if 'momentum' in ep:
+        try:
+            train_kwargs['momentum'] = float(ep['momentum'])
+        except (ValueError, TypeError):
+            pass
+
+    # weight_decay
+    if 'weight_decay' in ep:
+        try:
+            train_kwargs['weight_decay'] = float(ep['weight_decay'])
+        except (ValueError, TypeError):
+            pass
+
+    # optimizer
+    opt = ep.get('optimizer', '')
+    if opt:
+        train_kwargs['optimizer'] = opt
+
+    # val (default True)
+    if 'val' in ep:
+        train_kwargs['val'] = bool(ep['val'])
+
+    # max_det (only when val is True)
+    if ep.get('val', True) and 'max_det' in ep:
+        try:
+            train_kwargs['max_det'] = int(ep['max_det'])
+        except (ValueError, TypeError):
+            pass
+
+    results = model.train(**train_kwargs)
     copy_and_remove_latest_run_files(model_save_path, project_name, task)
     clean_up(os.path.dirname(data_yaml))
     return results
@@ -348,14 +443,19 @@ def parse_args():
     epochs            = int(sys.argv[7])
     yaml_path         = sys.argv[8]
     batch_size        = int(sys.argv[9])
-    # argv[10] is the custom model path (may be an empty string)
     custom_model_path = sys.argv[10] if len(sys.argv) > 10 else None
     if custom_model_path == "":
         custom_model_path = None
 
+    extra_json = sys.argv[11] if len(sys.argv) > 11 else '{}'
+    try:
+        extra_params = json.loads(extra_json) if extra_json else {}
+    except Exception:
+        extra_params = {}
+
     results = train_yolo(
         yaml_path, model_type, img_size, batch_size, epochs,
-        model_save_path, project_name, custom_model_path,
+        model_save_path, project_name, custom_model_path, extra_params,
     )
     print(f"Training completed. Model saved to {model_save_path}")
 
