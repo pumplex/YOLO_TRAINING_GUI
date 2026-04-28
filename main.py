@@ -2853,6 +2853,7 @@ def show_live_video_window() -> None:
         url_entry.focus_set()
 
         def _confirm():
+            global _live_video_path
             url = url_entry.get().strip()
             if url:
                 _live_video_path = url

@@ -205,37 +205,100 @@ def clean_up(train_data_path):
     for path in ['train', 'val']:
         shutil.rmtree(os.path.join(train_data_path, path), ignore_errors=True)
 
-def copy_and_remove_latest_run_files(model_save_path, project_name, task='detect'):
-    """Copy training artefacts from the runs directory to model_save_path."""
+def copy_and_remove_latest_run_files(model_save_path, project_name, task='detect', source_dir=None):
+    """Copy training artefacts from the runs directory to model_save_path.
+
+    Parameters
+    ----------
+    model_save_path : str or Path
+        Destination directory where artefacts should be copied.
+    project_name : str
+        The training run name (used only for the fallback directory search).
+    task : str
+        YOLO task type used for the fallback directory search.
+    source_dir : str or Path, optional
+        Exact path to the run directory produced by YOLO (i.e.
+        ``model.trainer.save_dir``).  When provided the directory search is
+        skipped entirely, which avoids mismatches caused by YOLO appending a
+        deduplication suffix to the project name (e.g. ``run2``, ``run3``).
+    """
     model_save_path = Path(model_save_path)
 
-    # Search the expected task directory first, then fall back to all known tasks
-    list_of_dirs: list[Path] = []
-    all_tasks = (task, 'detect', 'segment', 'classify', 'pose', 'obb', 'train')
-    for candidate_task in all_tasks:
-        candidate_base = Path('runs') / candidate_task
-        if candidate_base.exists():
-            list_of_dirs = list(candidate_base.glob(project_name))
-            if list_of_dirs:
-                break
+    # ── Resolve the source directory ─────────────────────────────────────────
+    if source_dir is not None:
+        latest_dir = Path(source_dir)
+        if not latest_dir.exists():
+            print(f"Source run directory '{latest_dir}' does not exist. Skipping copy.")
+            return
+    else:
+        # Fallback: search the runs tree relative to CWD for a matching name.
+        list_of_dirs: list[Path] = []
+        all_tasks = (task, 'detect', 'segment', 'classify', 'pose', 'obb', 'train')
+        for candidate_task in all_tasks:
+            candidate_base = Path('runs') / candidate_task
+            if candidate_base.exists():
+                list_of_dirs = list(candidate_base.glob(project_name))
+                if list_of_dirs:
+                    break
 
-    if not list_of_dirs:
-        print(f"No 'runs/{task}/{project_name}' directories found. Skipping copy and removal.")
-        return
+        if not list_of_dirs:
+            print(f"No 'runs/{task}/{project_name}' directories found. Skipping copy.")
+            return
 
-    latest_dir = max(list_of_dirs, key=lambda p: p.stat().st_mtime)
+        latest_dir = max(list_of_dirs, key=lambda p: p.stat().st_mtime)
 
-    if latest_dir.exists():
+    # ── Copy artefacts ────────────────────────────────────────────────────────
+    model_save_path.mkdir(parents=True, exist_ok=True)
+    copy_ok = True
+    try:
         for item in latest_dir.iterdir():
             dest = model_save_path / item.name
             if item.is_dir():
                 shutil.copytree(str(item), str(dest), dirs_exist_ok=True)
             else:
                 shutil.copy2(str(item), str(dest))
+        print(f"Training artefacts copied from '{latest_dir}' to '{model_save_path}'.")
+    except Exception as exc:
+        print(f"Error copying training artefacts: {exc}")
+        copy_ok = False
 
-    runs_dir = Path('runs')
-    if runs_dir.exists() and runs_dir.is_dir():
-        shutil.rmtree(str(runs_dir))
+    if not copy_ok:
+        print(
+            f"Copy did not complete cleanly. "
+            f"The source run directory '{latest_dir}' has NOT been removed."
+        )
+        return
+
+    # ── Verify every copied item then delete the source run folder ────────────
+    # Only the specific run directory that was just copied is removed; the rest
+    # of the runs tree (sibling runs, parent task folder, etc.) is untouched.
+    verify_ok = True
+    for item in latest_dir.iterdir():
+        dest = model_save_path / item.name
+        if not dest.exists():
+            print(f"Verification failed: '{dest}' not found in destination.")
+            verify_ok = False
+            break
+        if item.is_file():
+            if item.stat().st_size != dest.stat().st_size:
+                print(
+                    f"Verification failed: size mismatch for '{item.name}' "
+                    f"(source {item.stat().st_size} B, dest {dest.stat().st_size} B)."
+                )
+                verify_ok = False
+                break
+
+    if verify_ok:
+        try:
+            shutil.rmtree(str(latest_dir))
+            print(f"Source run directory '{latest_dir}' removed after successful copy.")
+        except Exception as exc:
+            print(f"Could not remove source run directory '{latest_dir}': {exc}")
+    else:
+        print(
+            f"Verification did not pass. "
+            f"The source run directory '{latest_dir}' has NOT been removed."
+        )
 
 def _find_split_images_dir(root: Path, aliases: list) -> Path | None:
     """Return the first *root/alias/images* directory that exists and has files."""
@@ -434,8 +497,11 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
             pass
 
     results = model.train(**train_kwargs)
-    copy_and_remove_latest_run_files(model_save_path, project_name, task)
-    clean_up(os.path.dirname(data_yaml))
+    # Use the exact save directory recorded by the trainer so the copy always
+    # targets the right folder, even when YOLO appends a deduplication suffix.
+    trainer_save_dir = getattr(getattr(model, 'trainer', None), 'save_dir', None)
+    copy_and_remove_latest_run_files(model_save_path, project_name, task,
+                                     source_dir=trainer_save_dir)
     return results
 
 def parse_args():
