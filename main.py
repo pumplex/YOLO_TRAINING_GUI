@@ -4680,19 +4680,35 @@ def _format_eta(seconds: float) -> str:
 
 
 def _load_results_csv_into_graphs(project_name_: str) -> bool:
-    """Pre-populate loss graphs from runs/.../results.csv for a given project.
+    """Pre-populate loss graphs from results.csv for a given project.
 
-    Looks for results.csv under any known task sub-directory.
+    Search order:
+    1. ``model_save_path/results.csv``  – the normal location after a completed
+       run (copy_and_remove_latest_run_files copies everything there and then
+       deletes the entire runs/ tree).
+    2. ``runs/<task>/<project>/results.csv``  – fallback for a run that was
+       interrupted before copy_and_remove ran (file is still in the YOLO output
+       directory).
+
     Returns True if data was loaded, False otherwise.
-    Columns used: index 2=box_loss, 3=cls_loss, 4=dfl_loss (0-based).
+    Columns used (0-based): 2=box_loss, 3=cls_loss, 4=dfl_loss.
     """
-    runs_base = Path("runs")
     csv_path = None
-    for task_dir in ("detect", "segment", "classify", "pose", "obb", "train"):
-        candidate = runs_base / task_dir / project_name_ / "results.csv"
+
+    # 1) Primary: model_save_path (set by the user via the Browse button)
+    if model_save_path:
+        candidate = Path(model_save_path) / "results.csv"
         if candidate.exists():
             csv_path = candidate
-            break
+
+    # 2) Fallback: live runs directory (interrupted / still in-progress run)
+    if csv_path is None:
+        runs_base = Path("runs")
+        for task_dir in ("detect", "segment", "classify", "pose", "obb", "train"):
+            candidate = runs_base / task_dir / project_name_ / "results.csv"
+            if candidate.exists():
+                csv_path = candidate
+                break
 
     if csv_path is None:
         return False
