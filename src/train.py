@@ -475,7 +475,6 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
     trainer_save_dir = getattr(getattr(model, 'trainer', None), 'save_dir', None)
     copy_and_remove_latest_run_files(model_save_path, project_name, task,
                                      source_dir=trainer_save_dir)
-    clean_up(os.path.dirname(data_yaml))
     return results
 
 def parse_args():
