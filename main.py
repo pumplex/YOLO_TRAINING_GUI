@@ -1081,11 +1081,11 @@ def show_ai_train_window() -> None:
         label_font=("Segoe UI", 14, "bold"),
         corner_radius=8,
     )
-    config_panel.place(relx=0, rely=0, relwidth=0.37, relheight=1.0)
+    config_panel.place(relx=0, rely=0, relwidth=0.30, relheight=1.0)
 
     # ── Right: log / output panel ──────────────────────────────────────────
     log_panel = ctk.CTkFrame(master=main_frame, corner_radius=8)
-    log_panel.place(relx=0.38, rely=0, relwidth=0.62, relheight=1.0)
+    log_panel.place(relx=0.31, rely=0, relwidth=0.69, relheight=1.0)
 
     PAD  = {"padx": 14, "pady": 5}
     FLAB = ("Segoe UI", 13)
@@ -2081,7 +2081,7 @@ def show_ai_train_window() -> None:
     ).pack(fill="x", padx=12, pady=(0, 0))
 
     output_textbox = ctk.CTkTextbox(
-        log_panel, font=("Courier New", 12), corner_radius=8, height=240
+        log_panel, font=("Courier New", 12), corner_radius=8, height=312
     )
     output_textbox.pack(fill="x", padx=12, pady=(0, 4))
 
@@ -2093,7 +2093,7 @@ def show_ai_train_window() -> None:
     # ── Loss graphs (CTkTabview with one tab per metric) ───────────────────
     _train_loss_graph_canvases = {}
     _train_loss_graph_figs = {}
-    _train_loss_graph_frame = ctk.CTkTabview(log_panel, height=160)
+    _train_loss_graph_frame = ctk.CTkTabview(log_panel, height=112)
     _train_loss_graph_frame.pack(fill="both", expand=True, padx=12, pady=(4, 4))
 
     for _loss_name in ("box_loss", "cls_loss", "dfl_loss"):
@@ -4804,7 +4804,7 @@ def _create_loss_graph_in_tab(parent_frame, loss_name: str) -> None:
     canvas = _MplCanvas(fig, master=parent_frame)
     canvas.draw()
     widget = canvas.get_tk_widget()
-    widget.pack(expand=True)
+    widget.pack(fill="both", expand=True)
     widget.bind("<Button-1>", lambda _e, n=loss_name: _open_loss_graph_popup(n))
 
     _train_loss_graph_figs[loss_name]     = fig
