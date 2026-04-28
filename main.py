@@ -728,6 +728,26 @@ _detect_task_var          = None        # StringVar for model task override
 _detect_progress_label    = None        # text progress label
 _detect_nav_bar           = None        # bottom nav bar in detect view
 _detect_zoom_var          = None        # DoubleVar – image preview zoom level
+_detect_results_dir       = None        # user-chosen results output folder (None = default)
+_detect_results_dir_label = None        # CTkLabel showing the chosen results folder
+
+# ── Detect tab – live thumbnail grid constants ────────────────────────────────
+_LIVE_THUMB_SIZE      = 120    # max pixels per side for live preview thumbnails
+_LIVE_THUMB_COLS      = 4      # columns in the live thumbnail grid
+_MAX_LIVE_THUMBS      = 200    # max thumbnails kept in the grid at once
+_LIVE_THUMB_BATCH     = 16     # thumbnails processed per UI poll tick
+_LIVE_THUMB_QUEUE_TMO = 0.5    # seconds the worker blocks waiting for a new path
+
+# ── Detect tab – live thumbnail grid state ────────────────────────────────────
+_detect_live_grid_overlay   = None   # CTkFrame covering image_label during detection
+_detect_live_grid_frame     = None   # CTkScrollableFrame inside overlay
+_detect_live_grid_count_lbl = None   # CTkLabel – "N processed / M shown"
+_detect_live_grid_rows      = []     # list of (row_frame, [label_widgets]) per row
+_detect_live_thumb_total    = 0      # total thumbnails received so far
+_detect_live_col_idx        = 0      # next column to fill in the current row
+_detect_thumb_path_queue    = None   # Queue: paths from detection thread → worker
+_detect_thumb_ui_queue      = None   # Queue: (path, PIL.Image) worker → main thread
+_detect_thumb_stop          = None   # threading.Event to stop worker thread
 
 # Train tab widget references
 _train_class_names_text   = None    # CTkTextbox – class names in Train tab
@@ -1000,6 +1020,10 @@ def on_sidebar_select(key: str) -> None:
     global _detect_model_info_label, _detect_conf_var, _detect_half_var
     global _detect_workers_var, _detect_task_var, _detect_progress_label, _detect_nav_bar
     global _detect_zoom_var
+    global _detect_results_dir_label
+    global _detect_live_grid_overlay, _detect_live_grid_frame, _detect_live_grid_count_lbl
+    global _detect_live_grid_rows, _detect_live_thumb_total, _detect_live_col_idx
+    global _detect_thumb_path_queue, _detect_thumb_ui_queue, _detect_thumb_stop
     global _live_video_label, _live_video_status_label, _live_video_start_btn, _live_video_bar
     global _live_video_pause_btn, _live_video_seek_slider, _live_video_half_var
     global _live_video_conf_var, _live_video_paused
@@ -1041,6 +1065,19 @@ def on_sidebar_select(key: str) -> None:
     _detect_progress_label = None
     _detect_nav_bar = None
     _detect_zoom_var = None
+    _detect_results_dir_label = None
+    # Stop live thumbnail worker if running, then reset grid state
+    if _detect_thumb_stop is not None:
+        _detect_thumb_stop.set()
+    _detect_live_grid_overlay   = None
+    _detect_live_grid_frame     = None
+    _detect_live_grid_count_lbl = None
+    _detect_live_grid_rows      = []
+    _detect_live_thumb_total    = 0
+    _detect_live_col_idx        = 0
+    _detect_thumb_path_queue    = None
+    _detect_thumb_ui_queue      = None
+    _detect_thumb_stop          = None
     _live_video_label = None
     _live_video_status_label = None
     _live_video_start_btn = None
@@ -2273,6 +2310,8 @@ def show_image_detection_window() -> None:
     global _detect_file_count_label, _detect_model_info_label
     global _detect_conf_var, _detect_half_var, _detect_workers_var, _detect_task_var
     global _detect_progress_label, _detect_nav_bar
+    global _detect_live_grid_overlay, _detect_live_grid_frame, _detect_live_grid_count_lbl
+    global _detect_results_dir_label
 
     FONT  = ("Segoe UI", 12)
     FLAB  = ("Segoe UI", 12)
@@ -2315,6 +2354,38 @@ def show_image_detection_window() -> None:
         cfg, text=_detect_file_count_text, font=("Segoe UI", 10), text_color="#6c7086", anchor="w",
     )
     _detect_file_count_label.pack(fill="x", padx=12)
+    _csep()
+
+    # Results folder section
+    _clbl("💾  Results Output Folder")
+    sel_results_btn = ctk.CTkButton(
+        cfg, text="Browse Results Folder…", font=FBTN, height=34,
+        command=select_detection_results_folder,
+    )
+    sel_results_btn.pack(fill="x", padx=12, pady=(4, 2))
+    Tooltip(
+        sel_results_btn,
+        "Choose where detection results (annotated images/videos) are saved.\n"
+        "Leave unset to save into a 'results' sub-folder inside the source folder.",
+    )
+
+    _results_dir_display = Path(_detect_results_dir).name if _detect_results_dir else "Default (source folder / results)"
+    _results_dir_color   = "#4caf50" if _detect_results_dir else "gray"
+    _detect_results_dir_label = ctk.CTkLabel(
+        cfg, text=_results_dir_display,
+        font=("Segoe UI", 10),
+        text_color=_results_dir_color,
+        anchor="w", wraplength=220,
+    )
+    _detect_results_dir_label.pack(fill="x", padx=12)
+
+    clear_results_dir_btn = ctk.CTkButton(
+        cfg, text="✕  Use Default Location", font=("Segoe UI", 10), height=24,
+        fg_color="#37474f", hover_color="#263238",
+        command=clear_detection_results_folder,
+    )
+    clear_results_dir_btn.pack(fill="x", padx=12, pady=(2, 0))
+    Tooltip(clear_results_dir_btn, "Reset to the default: save results inside the source folder.")
     _csep()
 
     # Model section
@@ -2441,6 +2512,28 @@ def show_image_detection_window() -> None:
 
     image_label = tk.Label(viewer, bg="#0d1117")
     image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
+
+    # ── Live thumbnail grid overlay (shown during detection, hidden otherwise) ─
+    _detect_live_grid_overlay = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#0d1117")
+    # Not placed yet – shown when detection starts; hidden when it ends.
+
+    _grid_header = ctk.CTkFrame(_detect_live_grid_overlay, fg_color="#161622", height=28)
+    _grid_header.pack(fill="x")
+    _grid_header.pack_propagate(False)
+
+    _detect_live_grid_count_lbl = ctk.CTkLabel(
+        _grid_header,
+        text="Starting detection…",
+        font=("Segoe UI", 11),
+        text_color="#a6adc8",
+        anchor="w",
+    )
+    _detect_live_grid_count_lbl.pack(side="left", padx=10, pady=2)
+
+    _detect_live_grid_frame = ctk.CTkScrollableFrame(
+        _detect_live_grid_overlay, corner_radius=0, fg_color="#0d1117",
+    )
+    _detect_live_grid_frame.pack(fill="both", expand=True)
 
     # Bottom navigation bar (compact, two slim rows)
     _detect_nav_bar = ctk.CTkFrame(viewer, corner_radius=0, fg_color="#1e1e2e")
@@ -4491,6 +4584,26 @@ def select_detection_images_folder() -> None:
     _safe_label_configure(_detect_file_count_label, text="Counting files…")
 
 
+def select_detection_results_folder() -> None:
+    global _detect_results_dir
+    path = normalize_path(filedialog.askdirectory(title="Select Results Output Folder"))
+    if not path:
+        return
+    _detect_results_dir = str(path)
+    short = Path(path).name or str(path)
+    _safe_label_configure(_detect_results_dir_label, text=short, text_color="#4caf50")
+
+
+def clear_detection_results_folder() -> None:
+    global _detect_results_dir
+    _detect_results_dir = None
+    _safe_label_configure(
+        _detect_results_dir_label,
+        text="Default (source folder / results)",
+        text_color="gray",
+    )
+
+
 def select_detection_model() -> None:
     global detection_model_path, detect_model_label, image_paths, current_image_index
     global _detect_progress_value, _detect_progress_text, _detect_model_info_text
@@ -5329,6 +5442,8 @@ def toggle_image_detection() -> None:
 
 def _begin_image_detection() -> None:
     global _detection_running, _detection_cancel_flag
+    global _detect_thumb_path_queue, _detect_thumb_ui_queue, _detect_thumb_stop
+    global _detect_live_grid_rows, _detect_live_thumb_total, _detect_live_col_idx
 
     if not detection_images_folder_path:
         messagebox.showerror("Error", "Please select an images/videos folder first.")
@@ -5363,6 +5478,45 @@ def _begin_image_detection() -> None:
             pass
     _safe_label_configure(_detect_progress_label, text="Starting…")
 
+    # ── Set up live thumbnail grid ────────────────────────────────────────────
+    # Stop any previous worker
+    if _detect_thumb_stop is not None:
+        _detect_thumb_stop.set()
+
+    _detect_thumb_path_queue = Queue()
+    _detect_thumb_ui_queue   = Queue()
+    _detect_thumb_stop       = threading.Event()
+
+    # Clear previous grid contents
+    _detect_live_thumb_total = 0
+    _detect_live_col_idx     = 0
+    _detect_live_grid_rows   = []
+    if _detect_live_grid_frame is not None:
+        try:
+            for child in list(_detect_live_grid_frame.winfo_children()):
+                child.destroy()
+        except Exception:
+            pass
+
+    _safe_label_configure(_detect_live_grid_count_lbl, text="Starting detection…")
+
+    # Switch viewer: hide single-image label, show live grid overlay
+    if image_label is not None:
+        try:
+            image_label.place_forget()
+        except Exception:
+            pass
+    if _detect_live_grid_overlay is not None:
+        try:
+            _detect_live_grid_overlay.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
+        except Exception:
+            pass
+
+    # Start background thumbnail worker
+    threading.Thread(target=_run_thumb_worker, daemon=True).start()
+    # Start periodic UI poll
+    root.after(300, _poll_detect_thumbs)
+
     # Collect options
     conf = _detect_conf_var.get() if _detect_conf_var else 0.5
     half = _detect_half_var.get() if _detect_half_var else False
@@ -5378,8 +5532,9 @@ def _begin_image_detection() -> None:
         root.after(0, lambda: _update_detect_progress(frac, current, total, msg))
 
     def _image_result_cb(result_path: str) -> None:
-        """Called by detect_images after each image is saved – display it immediately."""
-        root.after(0, lambda p=result_path: _show_single_result(p))
+        """Push the saved result path to the thumbnail worker queue (non-blocking)."""
+        if _detect_thumb_path_queue is not None:
+            _detect_thumb_path_queue.put(result_path)
 
     def _run_detect():
         """Thread target: run detection and guarantee the UI is always reset."""
@@ -5402,6 +5557,7 @@ def _begin_image_detection() -> None:
                 cancel_flag=lambda: _detection_cancel_flag[0],
                 task=task_val,
                 device=_get_device(),
+                results_dir=_detect_results_dir,
             )
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror("Detection Error", str(exc)))
@@ -5411,6 +5567,100 @@ def _begin_image_detection() -> None:
                 root.after(0, _show_detection_results)
 
     threading.Thread(target=_run_detect, daemon=True).start()
+
+
+def _run_thumb_worker() -> None:
+    """Background daemon thread: read result paths, generate small PIL thumbnails,
+    push them to the UI queue for the main thread to display."""
+    while not _detect_thumb_stop.is_set():
+        try:
+            path = _detect_thumb_path_queue.get(timeout=_LIVE_THUMB_QUEUE_TMO)
+        except Empty:
+            continue
+        try:
+            img = Image.open(path)
+            img.thumbnail((_LIVE_THUMB_SIZE, _LIVE_THUMB_SIZE), Image.Resampling.LANCZOS)
+            _detect_thumb_ui_queue.put((path, img))
+        except Exception:
+            pass
+
+
+def _poll_detect_thumbs() -> None:
+    """Main-thread periodic callback: drain the UI thumbnail queue in batches and
+    add thumbnails to the live grid. Re-schedules itself while detection is running."""
+    for _ in range(_LIVE_THUMB_BATCH):
+        try:
+            path, pil_img = _detect_thumb_ui_queue.get_nowait()
+            _add_live_thumb(pil_img)
+        except Empty:
+            break
+
+    if _detection_running:
+        root.after(300, _poll_detect_thumbs)
+    else:
+        # Drain any items that arrived after detection finished
+        while True:
+            try:
+                path, pil_img = _detect_thumb_ui_queue.get_nowait()
+                _add_live_thumb(pil_img)
+            except Empty:
+                break
+
+
+def _add_live_thumb(pil_img) -> None:
+    """Add one thumbnail to the live grid (main thread only).
+    When the grid reaches _MAX_LIVE_THUMBS thumbnails, the oldest row is
+    destroyed so memory stays bounded regardless of dataset size."""
+    global _detect_live_thumb_total, _detect_live_col_idx, _detect_live_grid_rows
+
+    if _detect_live_grid_frame is None:
+        return
+
+    try:
+        photo = ImageTk.PhotoImage(pil_img)
+    except Exception:
+        return
+
+    _detect_live_thumb_total += 1
+
+    # Start a new row when needed
+    if _detect_live_col_idx == 0:
+        try:
+            row_frame = ctk.CTkFrame(_detect_live_grid_frame, fg_color="transparent")
+            row_frame.pack(fill="x", padx=4, pady=2)
+        except Exception:
+            return
+        _detect_live_grid_rows.append((row_frame, []))
+
+    # Add label to the current (last) row
+    try:
+        row_frame, labels = _detect_live_grid_rows[-1]
+        lbl = tk.Label(row_frame, image=photo, bg="#1e1e2e", relief="flat")
+        lbl.pack(side="left", padx=3, pady=3)
+        lbl.image = photo  # keep PhotoImage alive via the widget
+        labels.append(lbl)
+    except Exception:
+        return
+
+    _detect_live_col_idx = (_detect_live_col_idx + 1) % _LIVE_THUMB_COLS
+
+    # Prune oldest row when we exceed the cap
+    max_rows = (_MAX_LIVE_THUMBS + _LIVE_THUMB_COLS - 1) // _LIVE_THUMB_COLS
+    while len(_detect_live_grid_rows) > max_rows:
+        oldest_frame, oldest_labels = _detect_live_grid_rows.pop(0)
+        try:
+            oldest_frame.destroy()
+        except Exception:
+            pass
+        oldest_labels.clear()
+
+    # Update header label
+    displayed = min(_detect_live_thumb_total, _MAX_LIVE_THUMBS)
+    _safe_label_configure(
+        _detect_live_grid_count_lbl,
+        text=f"Live preview · {_detect_live_thumb_total} processed  "
+             f"(showing latest {displayed})",
+    )
 
 
 def _cancel_image_detection() -> None:
@@ -5446,6 +5696,9 @@ def _show_single_result(result_path: str) -> None:
 
 def _on_detection_complete(results_dir: str) -> None:
     global image_paths, current_image_index
+    # Signal thumbnail worker to stop
+    if _detect_thumb_stop is not None:
+        _detect_thumb_stop.set()
     # Rebuild the full sorted list (catches any images the per-image callback may
     # have missed, e.g. for video frame results) and stay on the last viewed image.
     full_list = sorted(
@@ -5453,7 +5706,6 @@ def _on_detection_complete(results_dir: str) -> None:
         if p.is_file() and is_valid_image(str(p))
     )
     if full_list:
-        # Keep the user's current position if images were already displayed
         prev_index = current_image_index
         image_paths = full_list
         current_image_index = min(prev_index, len(image_paths) - 1)
@@ -5466,6 +5718,18 @@ def _on_detection_complete(results_dir: str) -> None:
 def _show_detection_results() -> None:
     global _detection_running, _detect_progress_value, _detect_progress_text
     _detection_running = False
+
+    # Hide live grid overlay and restore single-image viewer
+    if _detect_live_grid_overlay is not None:
+        try:
+            _detect_live_grid_overlay.place_forget()
+        except Exception:
+            pass
+    if image_label is not None:
+        try:
+            image_label.place(relx=0, rely=0, relwidth=1.0, relheight=0.88)
+        except Exception:
+            pass
 
     # Restore start button
     if _detect_start_btn:

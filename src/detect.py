@@ -251,6 +251,7 @@ def detect_images(
     cancel_flag: Optional[Callable] = None,
     task: Optional[str] = None,
     device: Optional[str] = None,
+    results_dir: Optional[Union[str, Path]] = None,
 ):
     """Run YOLO detection on all images/videos in a folder.
 
@@ -271,6 +272,9 @@ def detect_images(
     device
         Inference device string such as 'cuda' or 'cpu'.  When None the
         default Ultralytics device selection is used.
+    results_dir
+        Directory where detection results will be saved.  When None (default)
+        a ``results`` sub-folder inside *images_folder* is used.
     """
     model = YOLO(model_path, task=task)
 
@@ -281,7 +285,7 @@ def detect_images(
         print("No valid media files found in the directory")
         if callback:
             # Create the results dir so _on_detection_complete can scan it
-            empty_results = Path(images_folder) / 'results'
+            empty_results = normalize_path(results_dir) if results_dir else Path(images_folder) / 'results'
             empty_results.mkdir(parents=True, exist_ok=True)
             callback(str(empty_results))
         return
@@ -289,7 +293,10 @@ def detect_images(
     total = len(image_files) + len(video_files)
     current = 0
 
-    results_dir = Path(images_folder) / 'results'
+    if results_dir:
+        results_dir = normalize_path(results_dir)
+    else:
+        results_dir = Path(images_folder) / 'results'
     results_dir.mkdir(parents=True, exist_ok=True)
 
     # Process images one-by-one so we can report per-image progress
