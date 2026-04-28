@@ -4797,7 +4797,7 @@ def _create_loss_graph_in_tab(parent_frame, loss_name: str) -> None:
 
     BG  = "#1e1e2e"
     fig = _MplFigure(figsize=(3, 1.6), dpi=90, facecolor=BG)
-    fig.subplots_adjust(left=0.14, right=0.86, top=0.84, bottom=0.24)
+    fig.subplots_adjust(left=0.08, right=0.93, top=0.90, bottom=0.13)
     ax = fig.add_subplot(111)
     _draw_loss_graph_on_ax(ax, loss_name, compact=True)
 
