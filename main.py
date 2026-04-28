@@ -4797,14 +4797,14 @@ def _create_loss_graph_in_tab(parent_frame, loss_name: str) -> None:
 
     BG  = "#1e1e2e"
     fig = _MplFigure(figsize=(3, 1.6), dpi=90, facecolor=BG)
-    fig.subplots_adjust(left=0.14, right=0.97, top=0.84, bottom=0.24)
+    fig.subplots_adjust(left=0.14, right=0.86, top=0.84, bottom=0.24)
     ax = fig.add_subplot(111)
     _draw_loss_graph_on_ax(ax, loss_name, compact=True)
 
     canvas = _MplCanvas(fig, master=parent_frame)
     canvas.draw()
     widget = canvas.get_tk_widget()
-    widget.pack(fill="both", expand=True)
+    widget.pack(padx=(20, 20), pady=(0, 20), fill="both", expand=True)
     widget.bind("<Button-1>", lambda _e, n=loss_name: _open_loss_graph_popup(n))
 
     _train_loss_graph_figs[loss_name]     = fig
