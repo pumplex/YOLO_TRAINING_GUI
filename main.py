@@ -728,6 +728,8 @@ _detect_task_var          = None        # StringVar for model task override
 _detect_progress_label    = None        # text progress label
 _detect_nav_bar           = None        # bottom nav bar in detect view
 _detect_zoom_var          = None        # DoubleVar – image preview zoom level
+_detect_results_dir       = ""          # user-chosen results output folder ("" = default)
+_detect_results_dir_label = None        # CTkLabel showing the chosen results folder
 
 # ── Detect tab – live thumbnail grid constants ────────────────────────────────
 _LIVE_THUMB_SIZE = 120   # max pixels per side for live preview thumbnails
@@ -1016,6 +1018,7 @@ def on_sidebar_select(key: str) -> None:
     global _detect_model_info_label, _detect_conf_var, _detect_half_var
     global _detect_workers_var, _detect_task_var, _detect_progress_label, _detect_nav_bar
     global _detect_zoom_var
+    global _detect_results_dir_label
     global _detect_live_grid_overlay, _detect_live_grid_frame, _detect_live_grid_count_lbl
     global _detect_live_grid_rows, _detect_live_thumb_total, _detect_live_col_idx
     global _detect_thumb_path_queue, _detect_thumb_ui_queue, _detect_thumb_stop
@@ -1060,6 +1063,7 @@ def on_sidebar_select(key: str) -> None:
     _detect_progress_label = None
     _detect_nav_bar = None
     _detect_zoom_var = None
+    _detect_results_dir_label = None
     # Stop live thumbnail worker if running, then reset grid state
     if _detect_thumb_stop is not None:
         _detect_thumb_stop.set()
@@ -2305,6 +2309,7 @@ def show_image_detection_window() -> None:
     global _detect_conf_var, _detect_half_var, _detect_workers_var, _detect_task_var
     global _detect_progress_label, _detect_nav_bar
     global _detect_live_grid_overlay, _detect_live_grid_frame, _detect_live_grid_count_lbl
+    global _detect_results_dir_label
 
     FONT  = ("Segoe UI", 12)
     FLAB  = ("Segoe UI", 12)
@@ -2347,6 +2352,38 @@ def show_image_detection_window() -> None:
         cfg, text=_detect_file_count_text, font=("Segoe UI", 10), text_color="#6c7086", anchor="w",
     )
     _detect_file_count_label.pack(fill="x", padx=12)
+    _csep()
+
+    # Results folder section
+    _clbl("💾  Results Output Folder")
+    sel_results_btn = ctk.CTkButton(
+        cfg, text="Browse Results Folder…", font=FBTN, height=34,
+        command=select_detection_results_folder,
+    )
+    sel_results_btn.pack(fill="x", padx=12, pady=(4, 2))
+    Tooltip(
+        sel_results_btn,
+        "Choose where detection results (annotated images/videos) are saved.\n"
+        "Leave unset to save into a 'results' sub-folder inside the source folder.",
+    )
+
+    _results_dir_display = Path(_detect_results_dir).name if _detect_results_dir else "Default (source folder / results)"
+    _results_dir_color   = "#4caf50" if _detect_results_dir else "gray"
+    _detect_results_dir_label = ctk.CTkLabel(
+        cfg, text=_results_dir_display,
+        font=("Segoe UI", 10),
+        text_color=_results_dir_color,
+        anchor="w", wraplength=220,
+    )
+    _detect_results_dir_label.pack(fill="x", padx=12)
+
+    clear_results_dir_btn = ctk.CTkButton(
+        cfg, text="✕  Use Default Location", font=("Segoe UI", 10), height=24,
+        fg_color="#37474f", hover_color="#263238",
+        command=clear_detection_results_folder,
+    )
+    clear_results_dir_btn.pack(fill="x", padx=12, pady=(2, 0))
+    Tooltip(clear_results_dir_btn, "Reset to the default: save results inside the source folder.")
     _csep()
 
     # Model section
@@ -4545,6 +4582,26 @@ def select_detection_images_folder() -> None:
     _safe_label_configure(_detect_file_count_label, text="Counting files…")
 
 
+def select_detection_results_folder() -> None:
+    global _detect_results_dir
+    path = normalize_path(filedialog.askdirectory(title="Select Results Output Folder"))
+    if not path:
+        return
+    _detect_results_dir = str(path)
+    short = Path(path).name or str(path)
+    _safe_label_configure(_detect_results_dir_label, text=short, text_color="#4caf50")
+
+
+def clear_detection_results_folder() -> None:
+    global _detect_results_dir
+    _detect_results_dir = ""
+    _safe_label_configure(
+        _detect_results_dir_label,
+        text="Default (source folder / results)",
+        text_color="gray",
+    )
+
+
 def select_detection_model() -> None:
     global detection_model_path, detect_model_label, image_paths, current_image_index
     global _detect_progress_value, _detect_progress_text, _detect_model_info_text
@@ -5498,6 +5555,7 @@ def _begin_image_detection() -> None:
                 cancel_flag=lambda: _detection_cancel_flag[0],
                 task=task_val,
                 device=_get_device(),
+                results_dir=_detect_results_dir if _detect_results_dir else None,
             )
         except Exception as exc:
             root.after(0, lambda: messagebox.showerror("Detection Error", str(exc)))
