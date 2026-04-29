@@ -91,6 +91,11 @@ def _match_epoch(raw_line: str, stripped_line: str):
 _EPOCH_INNER_TRAIN_RE = re.compile(
     r'^(\d+)/(\d+)\s+\S+\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+\S+\s+\S+:\s*(\d+)%')
 
+# Inner-epoch classification training progress: "2/300  0.402G  3.42  32  224: 7%"
+# (classification has only one loss value instead of box/cls/dfl)
+_EPOCH_INNER_CLS_RE = re.compile(
+    r'^(\d+)/(\d+)\s+\S+\s+([\d.]+)\s+\S+\s+\S+:\s*(\d+)%')
+
 # Validation progress: "Class  Images  Instances  Box(...): 3%"
 _EPOCH_INNER_VAL_RE = re.compile(
     r'Class\s+Images\s+Instances.*?:\s*(\d+)%')
@@ -3155,11 +3160,12 @@ def show_ai_train_window() -> None:
         })
 
         # ── Class names ───────────────────────────────────────────────────
+        # Always clear first so names from a previous job are not left behind
+        class_names_text.delete("1.0", "end")
         names = cfg.get("class_names", [])
         if names:
-            class_names_text.delete("1.0", "end")
             class_names_text.insert("1.0", "\n".join(names))
-            _train_form_state["class_names"] = "\n".join(names)
+        _train_form_state["class_names"] = "\n".join(names)
 
         # ── Model selection ───────────────────────────────────────────────
         saved_model = cfg.get("selected_model", "")
@@ -3347,11 +3353,12 @@ def show_ai_train_window() -> None:
                 except Exception:
                     pass
 
-        # Restore custom_model_path
+        # Restore custom_model_path – always update (even to empty) so a path
+        # from a previous job is not inherited by the newly loaded config.
         saved_custom = cfg.get("custom_model_path", "")
+        global custom_model_path
+        custom_model_path = saved_custom
         if saved_custom:
-            global custom_model_path
-            custom_model_path = saved_custom
             _safe_label_configure(
                 custom_model_label,
                 text=f"Custom: {Path(saved_custom).name}",
@@ -3360,6 +3367,17 @@ def show_ai_train_window() -> None:
             if _custom_model_btn_ref[0]:
                 try:
                     _custom_model_btn_ref[0].configure(fg_color="#2e7d32", hover_color="#1b5e20")
+                except Exception:
+                    pass
+        else:
+            _safe_label_configure(
+                custom_model_label,
+                text="Using built-in pretrained weights",
+                text_color="gray",
+            )
+            if _custom_model_btn_ref[0]:
+                try:
+                    _custom_model_btn_ref[0].configure(fg_color="#37474f", hover_color="#263238")
                 except Exception:
                     pass
 
@@ -6757,7 +6775,7 @@ def _run_training_subprocess(
                     ep_tot = int(m.group(2))
                     root.after(0, lambda c=ep_cur, t=ep_tot: _update_train_progress(c, t))
 
-                # Inner-epoch training progress (includes loss values)
+                # Inner-epoch training progress (detection/segmentation: box+cls+dfl losses)
                 m_train = _EPOCH_INNER_TRAIN_RE.match(line)
                 if m_train:
                     pct = int(m_train.group(6))
@@ -6771,6 +6789,27 @@ def _run_training_subprocess(
                         _train_pending_losses[0] = (box_v, cls_v, dfl_v)
                     root.after(0, lambda p=pct, b=box_v, c=cls_v, d=dfl_v:
                                _update_epoch_inner_progress(p, False, b, c, d))
+                    continue
+
+                # Inner-epoch classification training progress (single loss value)
+                m_cls_train = _EPOCH_INNER_CLS_RE.match(line)
+                if m_cls_train:
+                    pct = int(m_cls_train.group(4))
+                    try:
+                        loss_v = float(m_cls_train.group(3))
+                    except (ValueError, IndexError):
+                        loss_v = None
+                    # Classification has only one loss; store it as cls_loss.
+                    # box_loss and dfl_loss are not used and kept as 0.0.
+                    if pct == 100 and loss_v is not None:
+                        _train_pending_losses[0] = (0.0, loss_v, 0.0)
+                    root.after(0, lambda p=pct, lv=loss_v:
+                               _update_epoch_inner_progress(
+                                   p, False,
+                                   0.0 if lv is not None else None,  # box (unused)
+                                   lv,                                # cls = training loss
+                                   0.0 if lv is not None else None,  # dfl (unused)
+                               ))
                     continue
 
                 # Validation progress
