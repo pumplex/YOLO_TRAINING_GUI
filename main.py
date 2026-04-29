@@ -2090,7 +2090,7 @@ def show_ai_train_window() -> None:
             ms = float(_train_multi_scale_var.get())
             state = "disabled" if ms > 0 else "normal"
             _rect_sw.configure(state=state)
-        except Exception:
+        except (ValueError, TypeError):
             pass
     _train_multi_scale_var.trace_add("write", _on_multi_scale_change)
     _on_multi_scale_change()
