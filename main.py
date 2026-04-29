@@ -963,6 +963,12 @@ _train_form_state = {
     "overlap_mask":    True,
     "mask_ratio":      4,
     "dropout":         0.0,
+    # Collapsible-section expand/collapse state (False = expanded, True = collapsed)
+    "_sec_advanced_collapsed":           False,
+    "_sec_training_behaviour_collapsed": True,
+    "_sec_warmup_collapsed":             True,
+    "_sec_loss_weights_collapsed":       True,
+    "_sec_task_specific_collapsed":      True,
 }
 
 # ── Detect tab form-state buffer ─────────────────────────────────────────────
@@ -1674,9 +1680,6 @@ def show_ai_train_window() -> None:
     )
     _sep()
 
-    # ── Advanced Training Options ──────────────────────────────────────────
-    _lbl("⚙  Advanced Training Options")
-
     def _make_spinbox(parent, initial_val, step=1, is_float=False, width=90):
         """Return (frame, StringVar) for a -/entry/+ spinbox."""
         frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1701,16 +1704,198 @@ def show_ai_train_window() -> None:
                       command=lambda: _adj(1)).pack(side="left")
         return frame, var
 
-    # Time slider (0 = disabled, 1-24 hours)
-    _lbl("Max Training Time (hours, 0 = disabled)")
+    def _lbl_p(parent, text: str):
+        """Label helper that targets a specific parent frame (used in collapsible sections)."""
+        l = ctk.CTkLabel(parent, text=text, font=FLAB, anchor="w")
+        l.pack(fill="x", padx=14, pady=(8, 1))
+        return l
+
+    def _make_collapsible_section(title, state_key, default_collapsed=False):
+        """Create a collapsible section header button + transparent content frame.
+
+        The header button toggles visibility of the body frame. State is persisted
+        in _train_form_state[state_key] so it survives tab switches.
+        Returns (header_button, body_frame).
+        """
+        is_collapsed = bool(_train_form_state.get(state_key, default_collapsed))
+        body = ctk.CTkFrame(config_panel, fg_color="transparent")
+
+        def _toggle():
+            now = bool(_train_form_state.get(state_key, default_collapsed))
+            new_val = not now
+            _train_form_state[state_key] = new_val
+            if new_val:  # collapsing
+                body.pack_forget()
+                hdr_btn.configure(text=f"▶  {title}")
+            else:  # expanding
+                body.pack(fill="x", after=hdr_btn)
+                hdr_btn.configure(text=f"▼  {title}")
+
+        hdr_btn = ctk.CTkButton(
+            config_panel,
+            text=f"{'▶' if is_collapsed else '▼'}  {title}",
+            font=("Segoe UI", 12, "bold"),
+            anchor="w",
+            fg_color=("#2d3035", "#1a1d20"),
+            hover_color=("#3d4045", "#2a2d30"),
+            height=34,
+            command=_toggle,
+        )
+        hdr_btn.pack(fill="x", padx=8, pady=(10, 0))
+        if not is_collapsed:
+            body.pack(fill="x")
+        return hdr_btn, body
+
+    # ── General Options (always visible) ─────────────────────────────────────
+    _sep()
+    _lbl("⚙  General Options")
+
+    # Cache Dataset Images
+    _cache_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _cache_row.pack(fill="x", **PAD)
+    _train_cache_var = ctk.BooleanVar(value=bool(_train_form_state.get("cache", False)))
+    _train_cache_var.trace_add("write", lambda *_: _train_form_state.update({"cache": _train_cache_var.get()}))
+    _cache_sw = ctk.CTkSwitch(_cache_row, text="Cache Dataset Images", variable=_train_cache_var, font=("Segoe UI", 12))
+    _cache_sw.pack(side="left")
+    Tooltip(_cache_sw,
+        "Enables caching of dataset images in memory (True/ram), on disk (disk),\n"
+        "or disables it (False). Improves training speed by reducing disk I/O\n"
+        "at the cost of increased memory usage.")
+
+    # Device
+    _lbl("Device")
+    _train_device_var = ctk.StringVar(value=str(_train_form_state.get("device", "auto")))
+    _train_device_var.trace_add("write", lambda *_: _train_form_state.update({"device": _train_device_var.get()}))
+    _device_entry = ctk.CTkEntry(
+        config_panel, placeholder_text="auto / cpu / 0 / 0,1 / mps", font=FENT, height=34,
+        textvariable=_train_device_var,
+    )
+    _device_entry.pack(fill="x", **PAD)
+    Tooltip(_device_entry,
+        "Which hardware to train on.\n\n"
+        "  auto  – let the app choose the best available device\n"
+        "  0     – first NVIDIA GPU\n"
+        "  0,1   – use two GPUs at once\n"
+        "  cpu   – CPU only (slower)\n"
+        "  mps   – Apple Silicon GPU\n"
+        "  npu   – Huawei Ascend NPU")
+
+    # Seed + Exist OK on same row
+    _seed_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _seed_row.pack(fill="x", **PAD)
+    _lbl_seed = ctk.CTkLabel(_seed_row, text="Seed:", font=("Segoe UI", 12), anchor="w")
+    _lbl_seed.pack(side="left")
+    try:
+        _seed_init = int(_train_form_state.get("seed", 0))
+    except (ValueError, TypeError):
+        _seed_init = 0
+    _seed_frame, _train_seed_var = _make_spinbox(_seed_row, _seed_init, width=70)
+    _train_seed_var.trace_add("write", lambda *_: _train_form_state.update({"seed": _train_seed_var.get()}))
+    _seed_frame.pack(side="left", padx=(4, 16))
+    _SEED_TIP = (
+        "Random seed for training.\n"
+        "Using the same seed with the same settings will produce identical results.\n"
+        "Useful for reproducing experiments.")
+    Tooltip(_lbl_seed,   _SEED_TIP)
+    Tooltip(_seed_frame, _SEED_TIP)
+    _train_exist_ok_var = ctk.BooleanVar(value=bool(_train_form_state.get("exist_ok", False)))
+    _train_exist_ok_var.trace_add("write", lambda *_: _train_form_state.update({"exist_ok": _train_exist_ok_var.get()}))
+    _exist_ok_sw = ctk.CTkSwitch(_seed_row, text="Exist OK", variable=_train_exist_ok_var, font=("Segoe UI", 12))
+    _exist_ok_sw.pack(side="left")
+    Tooltip(_exist_ok_sw,
+        "If turned on, a previous run with the same project name will be overwritten.\n"
+        "If turned off, YOLO will create a numbered folder (e.g. run2) instead.")
+
+    # Deterministic + Verbose on same row
+    _flags_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _flags_row.pack(fill="x", **PAD)
+    _train_deterministic_var = ctk.BooleanVar(value=bool(_train_form_state.get("deterministic", True)))
+    _train_deterministic_var.trace_add("write", lambda *_: _train_form_state.update({"deterministic": _train_deterministic_var.get()}))
+    _det_sw = ctk.CTkSwitch(_flags_row, text="Deterministic", variable=_train_deterministic_var, font=("Segoe UI", 12))
+    _det_sw.pack(side="left", padx=(0, 16))
+    Tooltip(_det_sw,
+        "Forces the model to use the same algorithms every run, so results are\n"
+        "identical if you repeat with the same seed.\n"
+        "May be slightly slower than non-deterministic mode.")
+    _train_verbose_var = ctk.BooleanVar(value=bool(_train_form_state.get("verbose", True)))
+    _train_verbose_var.trace_add("write", lambda *_: _train_form_state.update({"verbose": _train_verbose_var.get()}))
+    _verbose_sw = ctk.CTkSwitch(_flags_row, text="Verbose", variable=_train_verbose_var, font=("Segoe UI", 12))
+    _verbose_sw.pack(side="left")
+    Tooltip(_verbose_sw,
+        "Show detailed progress and metrics in the training log.\n"
+        "Turn off to reduce output noise.")
+
+    # Single Class + Save Plots on same row
+    _scls_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _scls_row.pack(fill="x", **PAD)
+    _train_single_cls_var = ctk.BooleanVar(value=bool(_train_form_state.get("single_cls", False)))
+    _train_single_cls_var.trace_add("write", lambda *_: _train_form_state.update({"single_cls": _train_single_cls_var.get()}))
+    _scls_sw = ctk.CTkSwitch(_scls_row, text="Single Class", variable=_train_single_cls_var, font=("Segoe UI", 12))
+    _scls_sw.pack(side="left", padx=(0, 16))
+    Tooltip(_scls_sw,
+        "Treat all objects in the dataset as a single class (ignores class labels).\n"
+        "Useful when you only care about detecting 'something' vs nothing.")
+    _train_plots_var = ctk.BooleanVar(value=bool(_train_form_state.get("plots", True)))
+    _train_plots_var.trace_add("write", lambda *_: _train_form_state.update({"plots": _train_plots_var.get()}))
+    _plots_sw = ctk.CTkSwitch(_scls_row, text="Save Plots", variable=_train_plots_var, font=("Segoe UI", 12))
+    _plots_sw.pack(side="left")
+    Tooltip(_plots_sw,
+        "Save training/validation metric charts and sample prediction images.\n"
+        "Useful for reviewing how well training progressed.")
+
+    # Profile Speed
+    _prof_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _prof_row.pack(fill="x", **PAD)
+    _train_profile_var = ctk.BooleanVar(value=bool(_train_form_state.get("profile", False)))
+    _train_profile_var.trace_add("write", lambda *_: _train_form_state.update({"profile": _train_profile_var.get()}))
+    _profile_sw = ctk.CTkSwitch(_prof_row, text="Profile Speed", variable=_train_profile_var, font=("Segoe UI", 12))
+    _profile_sw.pack(side="left")
+    Tooltip(_profile_sw,
+        "Measure and log ONNX and TensorRT inference speeds during training.\n"
+        "Useful when you plan to export and deploy the model.")
+
+    # Classes filter entry
+    _lbl("Filter Classes (comma-separated IDs, blank = all)")
+    _train_classes_var = ctk.StringVar(value=str(_train_form_state.get("classes", "")))
+    _train_classes_var.trace_add("write", lambda *_: _train_form_state.update({"classes": _train_classes_var.get()}))
+    _classes_entry = ctk.CTkEntry(
+        config_panel, placeholder_text="e.g.  0,1,3  (blank = use all classes)", font=FENT, height=34,
+        textvariable=_train_classes_var,
+    )
+    _classes_entry.pack(fill="x", **PAD)
+    Tooltip(_classes_entry,
+        "Only train on specific class IDs from your dataset.\n"
+        "Enter the numeric class IDs separated by commas, e.g.  0,1,3\n"
+        "Leave blank to train on all classes.")
+
+    # Dataset Fraction spinbox
+    _lbl("Dataset Fraction (1.0 = full dataset)")
+    try:
+        _fraction_init = float(_train_form_state.get("fraction", 1.0))
+    except (ValueError, TypeError):
+        _fraction_init = 1.0
+    _frac_frame, _train_fraction_var = _make_spinbox(config_panel, _fraction_init, step=0.05, is_float=True)
+    _train_fraction_var.trace_add("write", lambda *_: _train_form_state.update({"fraction": _train_fraction_var.get()}))
+    _frac_frame.pack(fill="x", **PAD)
+    Tooltip(_frac_frame,
+        "Use only a portion of your dataset for training.\n"
+        "1.0 uses all available images, 0.5 uses half, etc.\n"
+        "Useful for quick experiments or when storage is limited.")
+
+    # ── Advanced Training Options (collapsible) ───────────────────────────────
+    _, _adv_body = _make_collapsible_section(
+        "⚙  Advanced Training Options", "_sec_advanced_collapsed"
+    )
+
+    # Time slider (0 = disabled, 1–24 hours)
+    _lbl_p(_adv_body, "Max Training Time (hours, 0 = disabled)")
     _train_time_var = ctk.DoubleVar(value=float(_train_form_state.get("time", 0.0)))
     _train_time_var.trace_add("write", lambda *_: _train_form_state.update({"time": _train_time_var.get()}))
     _time_slider = ctk.CTkSlider(
-        config_panel, from_=0, to=24, variable=_train_time_var,
-        number_of_steps=24,
+        _adv_body, from_=0, to=24, variable=_train_time_var, number_of_steps=24,
     )
     _time_slider.pack(fill="x", **PAD)
-    _time_val_lbl = ctk.CTkLabel(config_panel, text="0 hrs (disabled)", font=("Segoe UI", 11), anchor="w")
+    _time_val_lbl = ctk.CTkLabel(_adv_body, text="0 hrs (disabled)", font=("Segoe UI", 11), anchor="w")
     _time_val_lbl.pack(padx=14, anchor="w")
     def _on_time_change(*_):
         v = int(_train_time_var.get())
@@ -1723,12 +1908,12 @@ def show_ai_train_window() -> None:
         "Set to 0 to disable (use epochs instead).")
 
     # Patience spinbox
-    _lbl_patience = _lbl("Patience (early-stop epochs)")
+    _lbl_patience = _lbl_p(_adv_body, "Patience (early-stop epochs)")
     try:
         _patience_init = int(_train_form_state.get("patience", 100))
     except (ValueError, TypeError):
         _patience_init = 100
-    _patience_row, _train_patience_var = _make_spinbox(config_panel, _patience_init)
+    _patience_row, _train_patience_var = _make_spinbox(_adv_body, _patience_init)
     _train_patience_var.trace_add("write", lambda *_: _train_form_state.update({"patience": _train_patience_var.get()}))
     _patience_row.pack(fill="x", **PAD)
     _PATIENCE_TIP = (
@@ -1738,8 +1923,8 @@ def show_ai_train_window() -> None:
     Tooltip(_lbl_patience, _PATIENCE_TIP)
     Tooltip(_patience_row, _PATIENCE_TIP)
 
-    # Save toggle and Save Period spinbox on same row
-    _save_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    # Save toggle + Save Period spinbox on same row
+    _save_row = ctk.CTkFrame(_adv_body, fg_color="transparent")
     _save_row.pack(fill="x", **PAD)
     _train_save_var = ctk.BooleanVar(value=bool(_train_form_state.get("save", True)))
     _train_save_var.trace_add("write", lambda *_: _train_form_state.update({"save": _train_save_var.get()}))
@@ -1762,7 +1947,7 @@ def show_ai_train_window() -> None:
         "Frequency of saving model checkpoints (epochs). -1 = disabled.\n"
         "Useful for saving interim models during long training sessions.\n"
         "Only active when 'Save Checkpoints' is enabled.")
-    Tooltip(_lbl_sp,  _SP_TIP)
+    Tooltip(_lbl_sp,   _SP_TIP)
     Tooltip(_sp_frame, _SP_TIP)
     def _on_save_change(*_):
         state = "normal" if _train_save_var.get() else "disabled"
@@ -1772,28 +1957,15 @@ def show_ai_train_window() -> None:
             except Exception:
                 pass
     _train_save_var.trace_add("write", _on_save_change)
-    # Apply initial state
     _on_save_change()
 
-    # Cache toggle
-    _cache_row = ctk.CTkFrame(config_panel, fg_color="transparent")
-    _cache_row.pack(fill="x", **PAD)
-    _train_cache_var = ctk.BooleanVar(value=bool(_train_form_state.get("cache", False)))
-    _train_cache_var.trace_add("write", lambda *_: _train_form_state.update({"cache": _train_cache_var.get()}))
-    _cache_sw = ctk.CTkSwitch(_cache_row, text="Cache Dataset Images", variable=_train_cache_var, font=("Segoe UI", 12))
-    _cache_sw.pack(side="left")
-    Tooltip(_cache_sw,
-        "Enables caching of dataset images in memory (True/ram), on disk (disk),\n"
-        "or disables it (False). Improves training speed by reducing disk I/O\n"
-        "at the cost of increased memory usage.")
-
-    # Freeze spinbox
-    _lbl_freeze = _lbl("Freeze Layers (0 = disabled)")
+    # Freeze Layers spinbox
+    _lbl_freeze = _lbl_p(_adv_body, "Freeze Layers (0 = disabled)")
     try:
         _freeze_init = int(_train_form_state.get("freeze", 0))
     except (ValueError, TypeError):
         _freeze_init = 0
-    _freeze_row, _train_freeze_var = _make_spinbox(config_panel, _freeze_init)
+    _freeze_row, _train_freeze_var = _make_spinbox(_adv_body, _freeze_init)
     _train_freeze_var.trace_add("write", lambda *_: _train_form_state.update({"freeze": _train_freeze_var.get()}))
     _freeze_row.pack(fill="x", **PAD)
     _FREEZE_TIP = (
@@ -1804,7 +1976,7 @@ def show_ai_train_window() -> None:
     Tooltip(_freeze_row, _FREEZE_TIP)
 
     # Learning rates row
-    _lr_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _lr_row = ctk.CTkFrame(_adv_body, fg_color="transparent")
     _lr_row.pack(fill="x", **PAD)
     _lbl_lr0 = ctk.CTkLabel(_lr_row, text="Initial LR (lr0):", font=("Segoe UI", 12), anchor="w")
     _lbl_lr0.pack(side="left")
@@ -1836,8 +2008,8 @@ def show_ai_train_window() -> None:
     Tooltip(_lbl_lrf,   _LRF_TIP)
     Tooltip(_lrf_frame, _LRF_TIP)
 
-    # Momentum and Weight Decay row
-    _mom_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    # Momentum + Weight Decay row
+    _mom_row = ctk.CTkFrame(_adv_body, fg_color="transparent")
     _mom_row.pack(fill="x", **PAD)
     _lbl_mom = ctk.CTkLabel(_mom_row, text="Momentum:", font=("Segoe UI", 12), anchor="w")
     _lbl_mom.pack(side="left")
@@ -1867,12 +2039,12 @@ def show_ai_train_window() -> None:
     Tooltip(_wd_frame, _WD_TIP)
 
     # Optimizer dropdown
-    _lbl("Optimizer")
+    _lbl_p(_adv_body, "Optimizer")
     _OPTIMIZER_OPTIONS = ["auto", "SGD", "MuSGD", "Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp"]
     _train_optimizer_var = ctk.StringVar(value=str(_train_form_state.get("optimizer", "auto")))
     _train_optimizer_var.trace_add("write", lambda *_: _train_form_state.update({"optimizer": _train_optimizer_var.get()}))
     _opt_menu = ctk.CTkOptionMenu(
-        config_panel, values=_OPTIMIZER_OPTIONS, variable=_train_optimizer_var,
+        _adv_body, values=_OPTIMIZER_OPTIONS, variable=_train_optimizer_var,
         font=FBTN, height=32,
     )
     _opt_menu.pack(fill="x", **PAD)
@@ -1881,8 +2053,8 @@ def show_ai_train_window() -> None:
         "Adamax, AdamW, NAdam, RAdam, RMSProp, or auto for automatic selection\n"
         "based on model configuration. Affects convergence speed and stability.")
 
-    # Val toggle and Max Det spinbox on same row
-    _val_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    # Validation toggle + Max Det spinbox on same row
+    _val_row = ctk.CTkFrame(_adv_body, fg_color="transparent")
     _val_row.pack(fill="x", **PAD)
     _train_val_var = ctk.BooleanVar(value=bool(_train_form_state.get("val", True)))
     _train_val_var.trace_add("write", lambda *_: _train_form_state.update({"val": _train_val_var.get()}))
@@ -1914,126 +2086,14 @@ def show_ai_train_window() -> None:
             except Exception:
                 pass
     _train_val_var.trace_add("write", _on_val_change)
-    _sep()
 
-    # ── General Options ─────────────────────────────────────────────────────
-    _lbl("⚙  General Options")
-
-    # Device
-    _lbl("Device")
-    _train_device_var = ctk.StringVar(value=str(_train_form_state.get("device", "auto")))
-    _train_device_var.trace_add("write", lambda *_: _train_form_state.update({"device": _train_device_var.get()}))
-    _device_entry = ctk.CTkEntry(
-        config_panel, placeholder_text="auto / cpu / 0 / 0,1 / mps", font=FENT, height=34,
-        textvariable=_train_device_var,
+    # ── Training Behaviour (collapsible) ─────────────────────────────────────
+    _, _tb_body = _make_collapsible_section(
+        "⚙  Training Behaviour", "_sec_training_behaviour_collapsed", default_collapsed=True
     )
-    _device_entry.pack(fill="x", **PAD)
-    Tooltip(_device_entry,
-        "Which hardware to train on.\n\n"
-        "  auto  – let the app choose the best available device\n"
-        "  0     – first NVIDIA GPU\n"
-        "  0,1   – use two GPUs at once\n"
-        "  cpu   – CPU only (slower)\n"
-        "  mps   – Apple Silicon GPU\n"
-        "  npu   – Huawei Ascend NPU")
 
-    # Seed and Exist OK on same row
-    _seed_row = ctk.CTkFrame(config_panel, fg_color="transparent")
-    _seed_row.pack(fill="x", **PAD)
-    _lbl_seed = ctk.CTkLabel(_seed_row, text="Seed:", font=("Segoe UI", 12), anchor="w")
-    _lbl_seed.pack(side="left")
-    try:
-        _seed_init = int(_train_form_state.get("seed", 0))
-    except (ValueError, TypeError):
-        _seed_init = 0
-    _seed_frame, _train_seed_var = _make_spinbox(_seed_row, _seed_init, width=70)
-    _train_seed_var.trace_add("write", lambda *_: _train_form_state.update({"seed": _train_seed_var.get()}))
-    _seed_frame.pack(side="left", padx=(4, 16))
-    _SEED_TIP = (
-        "Random seed for training.\n"
-        "Using the same seed with the same settings will produce identical results.\n"
-        "Useful for reproducing experiments.")
-    Tooltip(_lbl_seed,   _SEED_TIP)
-    Tooltip(_seed_frame, _SEED_TIP)
-    _train_exist_ok_var = ctk.BooleanVar(value=bool(_train_form_state.get("exist_ok", False)))
-    _train_exist_ok_var.trace_add("write", lambda *_: _train_form_state.update({"exist_ok": _train_exist_ok_var.get()}))
-    _exist_ok_sw = ctk.CTkSwitch(_seed_row, text="Exist OK", variable=_train_exist_ok_var, font=("Segoe UI", 12))
-    _exist_ok_sw.pack(side="left")
-    Tooltip(_exist_ok_sw,
-        "If turned on, a previous run with the same project name will be overwritten.\n"
-        "If turned off, YOLO will create a numbered folder (e.g. run2) instead.")
-
-    # Deterministic and Verbose on same row
-    _flags_row = ctk.CTkFrame(config_panel, fg_color="transparent")
-    _flags_row.pack(fill="x", **PAD)
-    _train_deterministic_var = ctk.BooleanVar(value=bool(_train_form_state.get("deterministic", True)))
-    _train_deterministic_var.trace_add("write", lambda *_: _train_form_state.update({"deterministic": _train_deterministic_var.get()}))
-    _det_sw = ctk.CTkSwitch(_flags_row, text="Deterministic", variable=_train_deterministic_var, font=("Segoe UI", 12))
-    _det_sw.pack(side="left", padx=(0, 16))
-    Tooltip(_det_sw,
-        "Forces the model to use the same algorithms every run, so results are\n"
-        "identical if you repeat with the same seed.\n"
-        "May be slightly slower than non-deterministic mode.")
-    _train_verbose_var = ctk.BooleanVar(value=bool(_train_form_state.get("verbose", True)))
-    _train_verbose_var.trace_add("write", lambda *_: _train_form_state.update({"verbose": _train_verbose_var.get()}))
-    _verbose_sw = ctk.CTkSwitch(_flags_row, text="Verbose", variable=_train_verbose_var, font=("Segoe UI", 12))
-    _verbose_sw.pack(side="left")
-    Tooltip(_verbose_sw,
-        "Show detailed progress and metrics in the training log.\n"
-        "Turn off to reduce output noise.")
-
-    # Single-cls and Profile on same row
-    _misc_row = ctk.CTkFrame(config_panel, fg_color="transparent")
-    _misc_row.pack(fill="x", **PAD)
-    _train_single_cls_var = ctk.BooleanVar(value=bool(_train_form_state.get("single_cls", False)))
-    _train_single_cls_var.trace_add("write", lambda *_: _train_form_state.update({"single_cls": _train_single_cls_var.get()}))
-    _scls_sw = ctk.CTkSwitch(_misc_row, text="Single Class", variable=_train_single_cls_var, font=("Segoe UI", 12))
-    _scls_sw.pack(side="left", padx=(0, 16))
-    Tooltip(_scls_sw,
-        "Treat all objects in the dataset as a single class (ignores class labels).\n"
-        "Useful when you only care about detecting 'something' vs nothing.")
-    _train_profile_var = ctk.BooleanVar(value=bool(_train_form_state.get("profile", False)))
-    _train_profile_var.trace_add("write", lambda *_: _train_form_state.update({"profile": _train_profile_var.get()}))
-    _profile_sw = ctk.CTkSwitch(_misc_row, text="Profile Speed", variable=_train_profile_var, font=("Segoe UI", 12))
-    _profile_sw.pack(side="left")
-    Tooltip(_profile_sw,
-        "Measure and log ONNX and TensorRT inference speeds during training.\n"
-        "Useful when you plan to export and deploy the model.")
-
-    # Classes filter entry
-    _lbl("Filter Classes (comma-separated IDs, blank = all)")
-    _train_classes_var = ctk.StringVar(value=str(_train_form_state.get("classes", "")))
-    _train_classes_var.trace_add("write", lambda *_: _train_form_state.update({"classes": _train_classes_var.get()}))
-    _classes_entry = ctk.CTkEntry(
-        config_panel, placeholder_text="e.g.  0,1,3  (blank = use all classes)", font=FENT, height=34,
-        textvariable=_train_classes_var,
-    )
-    _classes_entry.pack(fill="x", **PAD)
-    Tooltip(_classes_entry,
-        "Only train on specific class IDs from your dataset.\n"
-        "Enter the numeric class IDs separated by commas, e.g.  0,1,3\n"
-        "Leave blank to train on all classes.")
-
-    # Fraction spinbox
-    _lbl("Dataset Fraction (1.0 = full dataset)")
-    try:
-        _fraction_init = float(_train_form_state.get("fraction", 1.0))
-    except (ValueError, TypeError):
-        _fraction_init = 1.0
-    _frac_frame, _train_fraction_var = _make_spinbox(config_panel, _fraction_init, step=0.05, is_float=True)
-    _train_fraction_var.trace_add("write", lambda *_: _train_form_state.update({"fraction": _train_fraction_var.get()}))
-    _frac_frame.pack(fill="x", **PAD)
-    Tooltip(_frac_frame,
-        "Use only a portion of your dataset for training.\n"
-        "1.0 uses all available images, 0.5 uses half, etc.\n"
-        "Useful for quick experiments or when storage is limited.")
-    _sep()
-
-    # ── Training Behaviour ──────────────────────────────────────────────────
-    _lbl("⚙  Training Behaviour")
-
-    # AMP and Plots on same row
-    _amp_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    # AMP + Cosine LR on same row
+    _amp_row = ctk.CTkFrame(_tb_body, fg_color="transparent")
     _amp_row.pack(fill="x", **PAD)
     _train_amp_var = ctk.BooleanVar(value=bool(_train_form_state.get("amp", True)))
     _train_amp_var.trace_add("write", lambda *_: _train_form_state.update({"amp": _train_amp_var.get()}))
@@ -2043,40 +2103,33 @@ def show_ai_train_window() -> None:
         "Automatic Mixed Precision — uses 16-bit floats where possible.\n"
         "Speeds up training and uses less GPU memory with almost no accuracy loss.\n"
         "Recommended to leave enabled on modern NVIDIA GPUs.")
-    _train_plots_var = ctk.BooleanVar(value=bool(_train_form_state.get("plots", True)))
-    _train_plots_var.trace_add("write", lambda *_: _train_form_state.update({"plots": _train_plots_var.get()}))
-    _plots_sw = ctk.CTkSwitch(_amp_row, text="Save Plots", variable=_train_plots_var, font=("Segoe UI", 12))
-    _plots_sw.pack(side="left")
-    Tooltip(_plots_sw,
-        "Save training/validation metric charts and sample prediction images.\n"
-        "Useful for reviewing how well training progressed.")
-
-    # Rect and Cos-LR on same row
-    _rect_row = ctk.CTkFrame(config_panel, fg_color="transparent")
-    _rect_row.pack(fill="x", **PAD)
-    _train_rect_var = ctk.BooleanVar(value=bool(_train_form_state.get("rect", False)))
-    _train_rect_var.trace_add("write", lambda *_: _train_form_state.update({"rect": _train_rect_var.get()}))
-    _rect_sw = ctk.CTkSwitch(_rect_row, text="Rectangular Train", variable=_train_rect_var, font=("Segoe UI", 12))
-    _rect_sw.pack(side="left", padx=(0, 16))
-    Tooltip(_rect_sw,
-        "Batch images with minimal padding (rectangular batches instead of square).\n"
-        "Can improve speed by reducing wasted computation on padding pixels.\n"
-        "Disabled automatically when Multi-Scale > 0.")
     _train_cos_lr_var = ctk.BooleanVar(value=bool(_train_form_state.get("cos_lr", False)))
     _train_cos_lr_var.trace_add("write", lambda *_: _train_form_state.update({"cos_lr": _train_cos_lr_var.get()}))
-    _cos_lr_sw = ctk.CTkSwitch(_rect_row, text="Cosine LR", variable=_train_cos_lr_var, font=("Segoe UI", 12))
+    _cos_lr_sw = ctk.CTkSwitch(_amp_row, text="Cosine LR", variable=_train_cos_lr_var, font=("Segoe UI", 12))
     _cos_lr_sw.pack(side="left")
     Tooltip(_cos_lr_sw,
         "Use a cosine curve to gradually lower the learning rate over training.\n"
         "Often helps the model converge more smoothly.")
 
-    # Multi-scale spinbox
-    _lbl("Multi-Scale Augmentation (0 = disabled)")
+    # Rectangular Train (full row — auto-disabled when Multi-Scale > 0)
+    _rect_row = ctk.CTkFrame(_tb_body, fg_color="transparent")
+    _rect_row.pack(fill="x", **PAD)
+    _train_rect_var = ctk.BooleanVar(value=bool(_train_form_state.get("rect", False)))
+    _train_rect_var.trace_add("write", lambda *_: _train_form_state.update({"rect": _train_rect_var.get()}))
+    _rect_sw = ctk.CTkSwitch(_rect_row, text="Rectangular Train", variable=_train_rect_var, font=("Segoe UI", 12))
+    _rect_sw.pack(side="left")
+    Tooltip(_rect_sw,
+        "Batch images with minimal padding (rectangular batches instead of square).\n"
+        "Can improve speed by reducing wasted computation on padding pixels.\n"
+        "Disabled automatically when Multi-Scale > 0.")
+
+    # Multi-Scale Augmentation spinbox
+    _lbl_p(_tb_body, "Multi-Scale Augmentation (0 = disabled)")
     try:
         _ms_init = float(_train_form_state.get("multi_scale", 0.0))
     except (ValueError, TypeError):
         _ms_init = 0.0
-    _ms_frame, _train_multi_scale_var = _make_spinbox(config_panel, _ms_init, step=0.05, is_float=True)
+    _ms_frame, _train_multi_scale_var = _make_spinbox(_tb_body, _ms_init, step=0.05, is_float=True)
     _train_multi_scale_var.trace_add("write", lambda *_: _train_form_state.update({"multi_scale": _train_multi_scale_var.get()}))
     _ms_frame.pack(fill="x", **PAD)
     Tooltip(_ms_frame,
@@ -2095,13 +2148,13 @@ def show_ai_train_window() -> None:
     _train_multi_scale_var.trace_add("write", _on_multi_scale_change)
     _on_multi_scale_change()
 
-    # Close mosaic spinbox
-    _lbl("Close Mosaic (last N epochs, 0 = always use mosaic)")
+    # Close Mosaic spinbox
+    _lbl_p(_tb_body, "Close Mosaic (last N epochs, 0 = always use mosaic)")
     try:
         _cm_init = int(_train_form_state.get("close_mosaic", 10))
     except (ValueError, TypeError):
         _cm_init = 10
-    _cm_frame, _train_close_mosaic_var = _make_spinbox(config_panel, _cm_init)
+    _cm_frame, _train_close_mosaic_var = _make_spinbox(_tb_body, _cm_init)
     _train_close_mosaic_var.trace_add("write", lambda *_: _train_form_state.update({"close_mosaic": _train_close_mosaic_var.get()}))
     _cm_frame.pack(fill="x", **PAD)
     Tooltip(_cm_frame,
@@ -2110,13 +2163,13 @@ def show_ai_train_window() -> None:
         "model finalise on realistic single-image data.\n"
         "Set to 0 to keep mosaic on throughout all epochs.")
 
-    # Compile dropdown
-    _lbl("PyTorch Compile Mode")
+    # PyTorch Compile Mode dropdown
+    _lbl_p(_tb_body, "PyTorch Compile Mode")
     _COMPILE_OPTIONS = ["False", "default", "reduce-overhead", "max-autotune-no-cudagraphs"]
     _train_compile_var = ctk.StringVar(value=str(_train_form_state.get("compile", "False")))
     _train_compile_var.trace_add("write", lambda *_: _train_form_state.update({"compile": _train_compile_var.get()}))
     _compile_menu = ctk.CTkOptionMenu(
-        config_panel, values=_COMPILE_OPTIONS, variable=_train_compile_var,
+        _tb_body, values=_COMPILE_OPTIONS, variable=_train_compile_var,
         font=FBTN, height=32,
     )
     _compile_menu.pack(fill="x", **PAD)
@@ -2127,12 +2180,13 @@ def show_ai_train_window() -> None:
         "  default             – balanced speed / compatibility\n"
         "  reduce-overhead     – lower launch overhead, slightly more memory\n"
         "  max-autotune-no-cudagraphs – maximum speed tuning, no CUDA graphs")
-    _sep()
 
-    # ── Warmup Settings ─────────────────────────────────────────────────────
-    _lbl("⚙  Warmup Settings")
+    # ── Warmup Settings (collapsible) ─────────────────────────────────────────
+    _, _wu_body = _make_collapsible_section(
+        "⚙  Warmup Settings", "_sec_warmup_collapsed", default_collapsed=True
+    )
 
-    _wu_row1 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _wu_row1 = ctk.CTkFrame(_wu_body, fg_color="transparent")
     _wu_row1.pack(fill="x", **PAD)
     _lbl_we = ctk.CTkLabel(_wu_row1, text="Epochs:", font=("Segoe UI", 12), anchor="w")
     _lbl_we.pack(side="left")
@@ -2148,7 +2202,6 @@ def show_ai_train_window() -> None:
         "Prevents the model from being destabilised by a high learning rate at the very start.")
     Tooltip(_lbl_we,   _WE_TIP)
     Tooltip(_we_frame, _WE_TIP)
-
     _lbl_wm = ctk.CTkLabel(_wu_row1, text="Momentum:", font=("Segoe UI", 12), anchor="w")
     _lbl_wm.pack(side="left")
     try:
@@ -2164,7 +2217,7 @@ def show_ai_train_window() -> None:
     Tooltip(_lbl_wm,   _WM_TIP)
     Tooltip(_wm_frame, _WM_TIP)
 
-    _wu_row2 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _wu_row2 = ctk.CTkFrame(_wu_body, fg_color="transparent")
     _wu_row2.pack(fill="x", **PAD)
     _lbl_wblr = ctk.CTkLabel(_wu_row2, text="Bias LR:", font=("Segoe UI", 12), anchor="w")
     _lbl_wblr.pack(side="left")
@@ -2180,12 +2233,13 @@ def show_ai_train_window() -> None:
         "A higher bias LR at warmup helps the model find a good starting point quickly.")
     Tooltip(_lbl_wblr,   _WBLR_TIP)
     Tooltip(_wblr_frame, _WBLR_TIP)
-    _sep()
 
-    # ── Loss Weights ────────────────────────────────────────────────────────
-    _lbl("⚙  Loss Weights")
+    # ── Loss Weights (collapsible) ────────────────────────────────────────────
+    _, _lw_body = _make_collapsible_section(
+        "⚙  Loss Weights", "_sec_loss_weights_collapsed", default_collapsed=True
+    )
 
-    _loss_row1 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _loss_row1 = ctk.CTkFrame(_lw_body, fg_color="transparent")
     _loss_row1.pack(fill="x", **PAD)
     _lbl_box = ctk.CTkLabel(_loss_row1, text="Box:", font=("Segoe UI", 12), anchor="w")
     _lbl_box.pack(side="left")
@@ -2201,7 +2255,6 @@ def show_ai_train_window() -> None:
         "Higher = more emphasis on precise box placement.")
     Tooltip(_lbl_box,   _BOX_TIP)
     Tooltip(_box_frame, _BOX_TIP)
-
     _lbl_cls_l = ctk.CTkLabel(_loss_row1, text="Cls:", font=("Segoe UI", 12), anchor="w")
     _lbl_cls_l.pack(side="left")
     try:
@@ -2217,7 +2270,7 @@ def show_ai_train_window() -> None:
     Tooltip(_lbl_cls_l,   _CLS_L_TIP)
     Tooltip(_cls_l_frame, _CLS_L_TIP)
 
-    _loss_row2 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _loss_row2 = ctk.CTkFrame(_lw_body, fg_color="transparent")
     _loss_row2.pack(fill="x", **PAD)
     _lbl_dfl = ctk.CTkLabel(_loss_row2, text="DFL:", font=("Segoe UI", 12), anchor="w")
     _lbl_dfl.pack(side="left")
@@ -2233,7 +2286,6 @@ def show_ai_train_window() -> None:
         "Used in YOLOv8+ for more precise edge localisation.")
     Tooltip(_lbl_dfl,   _DFL_TIP)
     Tooltip(_dfl_frame, _DFL_TIP)
-
     _lbl_clspw = ctk.CTkLabel(_loss_row2, text="Cls PW:", font=("Segoe UI", 12), anchor="w")
     _lbl_clspw.pack(side="left")
     try:
@@ -2243,22 +2295,20 @@ def show_ai_train_window() -> None:
     _clspw_frame, _train_cls_pw_var = _make_spinbox(_loss_row2, _clspw_init, step=0.1, is_float=True, width=70)
     _train_cls_pw_var.trace_add("write", lambda *_: _train_form_state.update({"cls_pw": _train_cls_pw_var.get()}))
     _clspw_frame.pack(side="left", padx=(4, 0))
-    Tooltip(_lbl_clspw,
+    _CLSPW_TIP = (
         "Class power-weight for handling class imbalance.\n"
         "0 = no class weighting, 1 = full inverse-frequency weighting.\n"
         "Helps rarer classes get more attention during training.")
-    Tooltip(_clspw_frame,
-        "Class power-weight for handling class imbalance.\n"
-        "0 = no class weighting, 1 = full inverse-frequency weighting.\n"
-        "Helps rarer classes get more attention during training.")
+    Tooltip(_lbl_clspw,   _CLSPW_TIP)
+    Tooltip(_clspw_frame, _CLSPW_TIP)
 
-    # NBS spinbox
-    _lbl("Nominal Batch Size (for loss normalisation)")
+    # Nominal Batch Size spinbox
+    _lbl_p(_lw_body, "Nominal Batch Size (for loss normalisation)")
     try:
         _nbs_init = int(_train_form_state.get("nbs", 64))
     except (ValueError, TypeError):
         _nbs_init = 64
-    _nbs_frame, _train_nbs_var = _make_spinbox(config_panel, _nbs_init, step=8)
+    _nbs_frame, _train_nbs_var = _make_spinbox(_lw_body, _nbs_init, step=8)
     _train_nbs_var.trace_add("write", lambda *_: _train_form_state.update({"nbs": _train_nbs_var.get()}))
     _nbs_frame.pack(fill="x", **PAD)
     Tooltip(_nbs_frame,
@@ -2266,14 +2316,15 @@ def show_ai_train_window() -> None:
         "When your actual batch size differs, YOLO adjusts gradient accumulation\n"
         "so the effective training is equivalent to this batch size.\n"
         "Leave at 64 unless you know what you are changing.")
-    _sep()
 
-    # ── Task-Specific Loss Weights ──────────────────────────────────────────
-    _lbl("⚙  Task-Specific Loss Weights")
+    # ── Task-Specific Loss Weights (collapsible) ──────────────────────────────
+    _, _ts_body = _make_collapsible_section(
+        "⚙  Task-Specific Loss Weights", "_sec_task_specific_collapsed", default_collapsed=True
+    )
 
     # Pose Estimation: pose, kobj, rle
-    _pose_lbl = _lbl("Pose / Keypoint Losses  (Pose Estimation only)")
-    _pose_row1 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _pose_lbl = _lbl_p(_ts_body, "Pose / Keypoint Losses  (Pose Estimation only)")
+    _pose_row1 = ctk.CTkFrame(_ts_body, fg_color="transparent")
     _pose_row1.pack(fill="x", **PAD)
     _lbl_pose = ctk.CTkLabel(_pose_row1, text="Pose:", font=("Segoe UI", 12), anchor="w")
     _lbl_pose.pack(side="left")
@@ -2286,7 +2337,6 @@ def show_ai_train_window() -> None:
     _pose_frame.pack(side="left", padx=(4, 12))
     Tooltip(_lbl_pose,   "Weight for keypoint position accuracy loss (Pose only).")
     Tooltip(_pose_frame, "Weight for keypoint position accuracy loss (Pose only).")
-
     _lbl_kobj = ctk.CTkLabel(_pose_row1, text="KObj:", font=("Segoe UI", 12), anchor="w")
     _lbl_kobj.pack(side="left")
     try:
@@ -2299,7 +2349,7 @@ def show_ai_train_window() -> None:
     Tooltip(_lbl_kobj,   "Keypoint objectness loss weight — confidence that a keypoint exists (Pose only).")
     Tooltip(_kobj_frame, "Keypoint objectness loss weight — confidence that a keypoint exists (Pose only).")
 
-    _pose_row2 = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _pose_row2 = ctk.CTkFrame(_ts_body, fg_color="transparent")
     _pose_row2.pack(fill="x", **PAD)
     _lbl_rle = ctk.CTkLabel(_pose_row2, text="RLE:", font=("Segoe UI", 12), anchor="w")
     _lbl_rle.pack(side="left")
@@ -2314,8 +2364,8 @@ def show_ai_train_window() -> None:
     Tooltip(_rle_frame, "Residual log-likelihood loss weight for keypoint localisation precision (Pose only).")
 
     # OBB: angle
-    _obb_lbl = _lbl("Angle Loss  (OBB Detection only)")
-    _obb_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _obb_lbl = _lbl_p(_ts_body, "Angle Loss  (OBB Detection only)")
+    _obb_row = ctk.CTkFrame(_ts_body, fg_color="transparent")
     _obb_row.pack(fill="x", **PAD)
     _lbl_angle = ctk.CTkLabel(_obb_row, text="Angle:", font=("Segoe UI", 12), anchor="w")
     _lbl_angle.pack(side="left")
@@ -2330,8 +2380,8 @@ def show_ai_train_window() -> None:
     Tooltip(_angle_frame, "Weight for the bounding-box rotation angle loss (OBB Detection only).")
 
     # Segmentation: overlap_mask, mask_ratio
-    _seg_lbl = _lbl("Segmentation Mask Settings  (Segmentation only)")
-    _seg_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _seg_lbl = _lbl_p(_ts_body, "Segmentation Mask Settings  (Segmentation only)")
+    _seg_row = ctk.CTkFrame(_ts_body, fg_color="transparent")
     _seg_row.pack(fill="x", **PAD)
     _train_overlap_mask_var = ctk.BooleanVar(value=bool(_train_form_state.get("overlap_mask", True)))
     _train_overlap_mask_var.trace_add("write", lambda *_: _train_form_state.update({"overlap_mask": _train_overlap_mask_var.get()}))
@@ -2353,8 +2403,8 @@ def show_ai_train_window() -> None:
     Tooltip(_mr_frame, "How much to shrink segmentation masks during training (e.g. 4 = ¼ resolution). Lower = more detail, more memory.")
 
     # Classification: dropout
-    _cls_task_lbl = _lbl("Dropout  (Classification only)")
-    _dropout_row = ctk.CTkFrame(config_panel, fg_color="transparent")
+    _cls_task_lbl = _lbl_p(_ts_body, "Dropout  (Classification only)")
+    _dropout_row = ctk.CTkFrame(_ts_body, fg_color="transparent")
     _dropout_row.pack(fill="x", **PAD)
     try:
         _dropout_init = float(_train_form_state.get("dropout", 0.0))
