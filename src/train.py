@@ -489,6 +489,22 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
     if 'val' in ep:
         train_kwargs['val'] = bool(ep['val'])
 
+    # For classification tasks where data is a directory: if there is no val/
+    # subfolder Ultralytics sets data['val'] = None, which propagates to
+    # torchvision.datasets.ImageFolder(root=None) → os.path.expanduser(None) →
+    # TypeError on Windows.  Disable validation automatically in that case so
+    # training can still complete; the user can add a val/<class>/ structure to
+    # re-enable it.
+    if task == 'classify' and os.path.isdir(str(data_yaml)):
+        val_dir = Path(data_yaml) / 'val'
+        if not val_dir.is_dir():
+            print(
+                "  ⚠  Classification dataset has no 'val/' subfolder – disabling\n"
+                "     validation to avoid a crash (os.path.expanduser(None)).\n"
+                "     Add a 'val/<class>/' folder structure to enable validation."
+            )
+            train_kwargs['val'] = False
+
     # max_det (only when val is True)
     if ep.get('val', True) and 'max_det' in ep:
         try:
@@ -685,6 +701,66 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
     if 'dropout' in ep:
         try:
             train_kwargs['dropout'] = float(ep['dropout'])
+        except (ValueError, TypeError):
+            pass
+
+    # ── Augmentation hyperparameters ──────────────────────────────────────
+
+    # augment (TTA during validation; default False)
+    if 'augment' in ep:
+        train_kwargs['augment'] = bool(ep['augment'])
+
+    # HSV colour jitter
+    for _key in ('hsv_h', 'hsv_s', 'hsv_v'):
+        if _key in ep:
+            try:
+                train_kwargs[_key] = float(ep[_key])
+            except (ValueError, TypeError):
+                pass
+
+    # Geometric augmentations
+    for _key in ('degrees', 'translate', 'scale', 'shear', 'perspective'):
+        if _key in ep:
+            try:
+                train_kwargs[_key] = float(ep[_key])
+            except (ValueError, TypeError):
+                pass
+
+    # Flip probabilities
+    for _key in ('flipud', 'fliplr', 'bgr'):
+        if _key in ep:
+            try:
+                train_kwargs[_key] = float(ep[_key])
+            except (ValueError, TypeError):
+                pass
+
+    # Mosaic / mixup / copy-paste
+    for _key in ('mosaic', 'mixup', 'copy_paste'):
+        if _key in ep:
+            try:
+                train_kwargs[_key] = float(ep[_key])
+            except (ValueError, TypeError):
+                pass
+
+    # copy_paste_mode (string: 'flip' or 'mixup')
+    if 'copy_paste_mode' in ep:
+        train_kwargs['copy_paste_mode'] = str(ep['copy_paste_mode'])
+
+    # auto_augment policy (classification; string)
+    if 'auto_augment' in ep:
+        train_kwargs['auto_augment'] = str(ep['auto_augment'])
+
+    # erasing (random erasing probability; default 0.4)
+    if 'erasing' in ep:
+        try:
+            train_kwargs['erasing'] = float(ep['erasing'])
+        except (ValueError, TypeError):
+            pass
+
+    # crop_fraction (classification crop; default 1.0)
+    if 'crop_fraction' in ep:
+        try:
+            train_kwargs['crop_fraction'] = float(ep['crop_fraction'])
         except (ValueError, TypeError):
             pass
 

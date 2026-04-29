@@ -2486,9 +2486,9 @@ def show_ai_train_window() -> None:
     _aug_top_row.pack(fill="x", **PAD)
     _train_augment_var = ctk.BooleanVar(value=bool(_train_form_state.get("augment", False)))
     _train_augment_var.trace_add("write", lambda *_: _train_form_state.update({"augment": _train_augment_var.get()}))
-    _augment_sw = ctk.CTkSwitch(_aug_top_row, text="Test-Time Augmentation (TTA)", variable=_train_augment_var, font=("Segoe UI", 12))
-    _augment_sw.pack(side="left")
-    Tooltip(_augment_sw,
+    _train_augment_switch = ctk.CTkSwitch(_aug_top_row, text="Test-Time Augmentation (TTA)", variable=_train_augment_var, font=("Segoe UI", 12))
+    _train_augment_switch.pack(side="left")
+    Tooltip(_train_augment_switch,
         "Apply augmentation during validation/prediction (Test-Time Augmentation).\n"
         "Boosts mAP slightly at the cost of slower inference.\n"
         "Default: off.")
@@ -7368,9 +7368,18 @@ def _run_training_queue() -> None:
                 roboflow_yaml_path = job["roboflow_yaml"]
                 workers_int       = int(job.get("workers", 8))
 
-                # Build YAML
+                # Build YAML / data path
+                _job_model = job["selected_model"]
+                _job_custom = job["custom_model_path"] or ""
+                _job_is_cls = (
+                    job.get("task_type", "") == "Classification"
+                    or "-cls" in _job_model.lower()
+                    or ("-cls" in Path(_job_custom).stem.lower() if _job_custom else False)
+                )
                 if job["roboflow_yaml"]:
                     yaml_path = job["roboflow_yaml"]
+                elif _job_is_cls:
+                    yaml_path = train_data_path  # pass folder directly for classification
                 else:
                     try:
                         yaml_path = create_yaml(
@@ -7383,16 +7392,16 @@ def _run_training_queue() -> None:
                 _extra = job.get("extra_params", {})
                 cmd = [
                     sys.executable, "src/train.py",
-                    project_name,
-                    train_data_path,
+                    str(project_name),
+                    str(train_data_path),
                     ",".join(class_names),
-                    model_save_path,
-                    job["selected_model"],
+                    str(model_save_path),
+                    str(job["selected_model"]),
                     str(input_size),
                     str(epochs),
-                    yaml_path,
+                    str(yaml_path),
                     str(batch_size),
-                    custom_model_path,
+                    str(custom_model_path or ""),
                     json.dumps(_extra),
                 ]
                 epoch_re = _EPOCH_RE
