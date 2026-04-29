@@ -496,6 +496,198 @@ def train_yolo(data_yaml, model_type, img_size, batch, epochs, model_save_path,
         except (ValueError, TypeError):
             pass
 
+    # device (blank / 'auto' → omit so Ultralytics auto-selects)
+    device_val = ep.get('device', 'auto')
+    if device_val and str(device_val).strip().lower() not in ('', 'auto'):
+        train_kwargs['device'] = str(device_val).strip()
+
+    # seed
+    if 'seed' in ep:
+        try:
+            train_kwargs['seed'] = int(ep['seed'])
+        except (ValueError, TypeError):
+            pass
+
+    # deterministic (default True)
+    if 'deterministic' in ep:
+        train_kwargs['deterministic'] = bool(ep['deterministic'])
+
+    # verbose (default True)
+    if 'verbose' in ep:
+        train_kwargs['verbose'] = bool(ep['verbose'])
+
+    # exist_ok (default False)
+    if 'exist_ok' in ep:
+        train_kwargs['exist_ok'] = bool(ep['exist_ok'])
+
+    # single_cls (default False)
+    if 'single_cls' in ep:
+        train_kwargs['single_cls'] = bool(ep['single_cls'])
+
+    # classes – comma-separated IDs string → list of ints (blank = omit)
+    classes_raw = ep.get('classes', '')
+    if classes_raw and str(classes_raw).strip():
+        try:
+            train_kwargs['classes'] = [int(x.strip()) for x in str(classes_raw).split(',') if x.strip()]
+        except (ValueError, TypeError):
+            pass
+
+    # fraction (default 1.0)
+    if 'fraction' in ep:
+        try:
+            frac = float(ep['fraction'])
+            if 0.0 < frac <= 1.0:
+                train_kwargs['fraction'] = frac
+        except (ValueError, TypeError):
+            pass
+
+    # profile (default False)
+    if 'profile' in ep:
+        train_kwargs['profile'] = bool(ep['profile'])
+
+    # amp (default True)
+    if 'amp' in ep:
+        train_kwargs['amp'] = bool(ep['amp'])
+
+    # rect (default False)
+    if 'rect' in ep:
+        train_kwargs['rect'] = bool(ep['rect'])
+
+    # multi_scale (0.0 = disabled)
+    if 'multi_scale' in ep:
+        try:
+            ms = float(ep['multi_scale'])
+            if ms > 0:
+                train_kwargs['multi_scale'] = ms
+        except (ValueError, TypeError):
+            pass
+
+    # cos_lr (default False)
+    if 'cos_lr' in ep:
+        train_kwargs['cos_lr'] = bool(ep['cos_lr'])
+
+    # close_mosaic (default 10)
+    if 'close_mosaic' in ep:
+        try:
+            train_kwargs['close_mosaic'] = int(ep['close_mosaic'])
+        except (ValueError, TypeError):
+            pass
+
+    # plots (default True)
+    if 'plots' in ep:
+        train_kwargs['plots'] = bool(ep['plots'])
+
+    # compile (default False; "False" string → False bool)
+    compile_val = ep.get('compile', 'False')
+    if str(compile_val).lower() in ('false', '0', ''):
+        train_kwargs['compile'] = False
+    elif str(compile_val).lower() in ('true', '1'):
+        train_kwargs['compile'] = True
+    else:
+        train_kwargs['compile'] = str(compile_val)
+
+    # warmup_epochs (default 3.0)
+    if 'warmup_epochs' in ep:
+        try:
+            train_kwargs['warmup_epochs'] = float(ep['warmup_epochs'])
+        except (ValueError, TypeError):
+            pass
+
+    # warmup_momentum (default 0.8)
+    if 'warmup_momentum' in ep:
+        try:
+            train_kwargs['warmup_momentum'] = float(ep['warmup_momentum'])
+        except (ValueError, TypeError):
+            pass
+
+    # warmup_bias_lr (default 0.1)
+    if 'warmup_bias_lr' in ep:
+        try:
+            train_kwargs['warmup_bias_lr'] = float(ep['warmup_bias_lr'])
+        except (ValueError, TypeError):
+            pass
+
+    # box loss weight (default 7.5)
+    if 'box' in ep:
+        try:
+            train_kwargs['box'] = float(ep['box'])
+        except (ValueError, TypeError):
+            pass
+
+    # cls loss weight (default 0.5) – stored as 'cls_loss' in GUI to avoid name clash
+    if 'cls_loss' in ep:
+        try:
+            train_kwargs['cls'] = float(ep['cls_loss'])
+        except (ValueError, TypeError):
+            pass
+
+    # cls_pw (default 0.0)
+    if 'cls_pw' in ep:
+        try:
+            train_kwargs['cls_pw'] = float(ep['cls_pw'])
+        except (ValueError, TypeError):
+            pass
+
+    # dfl loss weight (default 1.5)
+    if 'dfl' in ep:
+        try:
+            train_kwargs['dfl'] = float(ep['dfl'])
+        except (ValueError, TypeError):
+            pass
+
+    # nbs (default 64)
+    if 'nbs' in ep:
+        try:
+            train_kwargs['nbs'] = int(ep['nbs'])
+        except (ValueError, TypeError):
+            pass
+
+    # pose loss weight (default 12.0)
+    if 'pose' in ep:
+        try:
+            train_kwargs['pose'] = float(ep['pose'])
+        except (ValueError, TypeError):
+            pass
+
+    # kobj loss weight (default 1.0)
+    if 'kobj' in ep:
+        try:
+            train_kwargs['kobj'] = float(ep['kobj'])
+        except (ValueError, TypeError):
+            pass
+
+    # rle loss weight (default 1.0)
+    if 'rle' in ep:
+        try:
+            train_kwargs['rle'] = float(ep['rle'])
+        except (ValueError, TypeError):
+            pass
+
+    # angle loss weight (default 1.0)
+    if 'angle' in ep:
+        try:
+            train_kwargs['angle'] = float(ep['angle'])
+        except (ValueError, TypeError):
+            pass
+
+    # overlap_mask (default True)
+    if 'overlap_mask' in ep:
+        train_kwargs['overlap_mask'] = bool(ep['overlap_mask'])
+
+    # mask_ratio (default 4)
+    if 'mask_ratio' in ep:
+        try:
+            train_kwargs['mask_ratio'] = int(ep['mask_ratio'])
+        except (ValueError, TypeError):
+            pass
+
+    # dropout (default 0.0)
+    if 'dropout' in ep:
+        try:
+            train_kwargs['dropout'] = float(ep['dropout'])
+        except (ValueError, TypeError):
+            pass
+
     results = model.train(**train_kwargs)
     # Use the exact save directory recorded by the trainer so the copy always
     # targets the right folder, even when YOLO appends a deduplication suffix.
