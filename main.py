@@ -801,6 +801,26 @@ _train_angle_var         = None   # StringVar – angle loss weight
 _train_overlap_mask_var  = None   # BooleanVar – overlap_mask
 _train_mask_ratio_var    = None   # StringVar – mask_ratio
 _train_dropout_var       = None   # StringVar – dropout
+# Augmentation argument variables
+_train_augment_var          = None   # BooleanVar – augment (TTA during val)
+_train_hsv_h_var            = None   # StringVar – hsv_h
+_train_hsv_s_var            = None   # StringVar – hsv_s
+_train_hsv_v_var            = None   # StringVar – hsv_v
+_train_degrees_var          = None   # StringVar – degrees
+_train_translate_var        = None   # StringVar – translate
+_train_scale_var            = None   # StringVar – scale
+_train_shear_var            = None   # StringVar – shear
+_train_perspective_var      = None   # StringVar – perspective
+_train_flipud_var           = None   # StringVar – flipud
+_train_fliplr_var           = None   # StringVar – fliplr
+_train_bgr_var              = None   # StringVar – bgr
+_train_mosaic_var           = None   # StringVar – mosaic
+_train_mixup_var            = None   # StringVar – mixup
+_train_copy_paste_var       = None   # StringVar – copy_paste
+_train_copy_paste_mode_var  = None   # StringVar – copy_paste_mode
+_train_auto_augment_var     = None   # StringVar – auto_augment
+_train_erasing_var          = None   # StringVar – erasing
+_train_crop_fraction_var    = None   # StringVar – crop_fraction (classification)
 # Task-specific widget groups for enable/disable on task change
 _train_pose_widgets      = []     # widgets only relevant for Pose Estimation task
 _train_obb_widgets       = []     # widgets only relevant for OBB Detection task
@@ -963,12 +983,33 @@ _train_form_state = {
     "overlap_mask":    True,
     "mask_ratio":      4,
     "dropout":         0.0,
+    # Augmentation hyperparameters
+    "augment":          False,
+    "hsv_h":            0.015,
+    "hsv_s":            0.7,
+    "hsv_v":            0.4,
+    "degrees":          0.0,
+    "translate":        0.1,
+    "scale":            0.5,
+    "shear":            0.0,
+    "perspective":      0.0,
+    "flipud":           0.0,
+    "fliplr":           0.5,
+    "bgr":              0.0,
+    "mosaic":           1.0,
+    "mixup":            0.0,
+    "copy_paste":       0.0,
+    "copy_paste_mode":  "flip",
+    "auto_augment":     "randaugment",
+    "erasing":          0.4,
+    "crop_fraction":    1.0,
     # Collapsible-section expand/collapse state (False = expanded, True = collapsed)
     "_sec_advanced_collapsed":           False,
     "_sec_training_behaviour_collapsed": True,
     "_sec_warmup_collapsed":             True,
     "_sec_loss_weights_collapsed":       True,
     "_sec_task_specific_collapsed":      True,
+    "_sec_augmentation_collapsed":       True,
 }
 
 # ── Detect tab form-state buffer ─────────────────────────────────────────────
@@ -1281,6 +1322,12 @@ def show_ai_train_window() -> None:
     global _train_overlap_mask_var, _train_mask_ratio_var, _train_dropout_var
     global _train_pose_widgets, _train_obb_widgets, _train_seg_widgets, _train_cls_task_widgets
     global _train_save_period_widget
+    global _train_augment_var, _train_hsv_h_var, _train_hsv_s_var, _train_hsv_v_var
+    global _train_degrees_var, _train_translate_var, _train_scale_var, _train_shear_var
+    global _train_perspective_var, _train_flipud_var, _train_fliplr_var, _train_bgr_var
+    global _train_mosaic_var, _train_mixup_var, _train_copy_paste_var
+    global _train_copy_paste_mode_var, _train_auto_augment_var, _train_erasing_var
+    global _train_crop_fraction_var
     global _train_data_btn_ref, _model_save_btn_ref, _custom_model_btn_ref
     global _train_stop_btn_ref
     global _train_epoch_bar, _train_epoch_bar_label
@@ -2428,6 +2475,275 @@ def show_ai_train_window() -> None:
 
     # Set initial state based on current task
     _on_task_type_change()
+
+    # ── Augmentation Settings (collapsible) ───────────────────────────────────
+    _, _aug_body = _make_collapsible_section(
+        "⚙  Augmentation Settings", "_sec_augmentation_collapsed", default_collapsed=True
+    )
+
+    # augment (TTA) + crop_fraction on same row
+    _aug_top_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _aug_top_row.pack(fill="x", **PAD)
+    _train_augment_var = ctk.BooleanVar(value=bool(_train_form_state.get("augment", False)))
+    _train_augment_var.trace_add("write", lambda *_: _train_form_state.update({"augment": _train_augment_var.get()}))
+    _augment_sw = ctk.CTkSwitch(_aug_top_row, text="Test-Time Augmentation (TTA)", variable=_train_augment_var, font=("Segoe UI", 12))
+    _augment_sw.pack(side="left")
+    Tooltip(_augment_sw,
+        "Apply augmentation during validation/prediction (Test-Time Augmentation).\n"
+        "Boosts mAP slightly at the cost of slower inference.\n"
+        "Default: off.")
+
+    # crop_fraction (classification only)
+    _lbl_p(_aug_body, "Crop Fraction  (Classification only)")
+    _cf_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _cf_row.pack(fill="x", **PAD)
+    try:
+        _cf_init = float(_train_form_state.get("crop_fraction", 1.0))
+    except (ValueError, TypeError):
+        _cf_init = 1.0
+    _cf_frame, _train_crop_fraction_var = _make_spinbox(_cf_row, _cf_init, step=0.05, is_float=True, width=70)
+    _train_crop_fraction_var.trace_add("write", lambda *_: _train_form_state.update({"crop_fraction": _train_crop_fraction_var.get()}))
+    _cf_frame.pack(side="left")
+    _CF_TIP = (
+        "Fraction of the image to use as the classification crop.\n"
+        "1.0 = full image, 0.875 = standard ImageNet-style centre crop.\n"
+        "Only applies to classification tasks.")
+    Tooltip(_cf_frame, _CF_TIP)
+
+    # HSV colour augmentation
+    _lbl_p(_aug_body, "HSV Colour Augmentation")
+    _hsv_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _hsv_row.pack(fill="x", **PAD)
+    _lbl_hsv_h = ctk.CTkLabel(_hsv_row, text="Hue:", font=("Segoe UI", 12), anchor="w")
+    _lbl_hsv_h.pack(side="left")
+    try:
+        _hsv_h_init = float(_train_form_state.get("hsv_h", 0.015))
+    except (ValueError, TypeError):
+        _hsv_h_init = 0.015
+    _hsv_h_frame, _train_hsv_h_var = _make_spinbox(_hsv_row, _hsv_h_init, step=0.005, is_float=True, width=70)
+    _train_hsv_h_var.trace_add("write", lambda *_: _train_form_state.update({"hsv_h": _train_hsv_h_var.get()}))
+    _hsv_h_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_hsv_h,   "Random hue jitter fraction (0.0–1.0).")
+    Tooltip(_hsv_h_frame, "Random hue jitter fraction (0.0–1.0).")
+    _lbl_hsv_s = ctk.CTkLabel(_hsv_row, text="Sat:", font=("Segoe UI", 12), anchor="w")
+    _lbl_hsv_s.pack(side="left")
+    try:
+        _hsv_s_init = float(_train_form_state.get("hsv_s", 0.7))
+    except (ValueError, TypeError):
+        _hsv_s_init = 0.7
+    _hsv_s_frame, _train_hsv_s_var = _make_spinbox(_hsv_row, _hsv_s_init, step=0.05, is_float=True, width=70)
+    _train_hsv_s_var.trace_add("write", lambda *_: _train_form_state.update({"hsv_s": _train_hsv_s_var.get()}))
+    _hsv_s_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_hsv_s,   "Random saturation jitter fraction (0.0–1.0).")
+    Tooltip(_hsv_s_frame, "Random saturation jitter fraction (0.0–1.0).")
+    _lbl_hsv_v = ctk.CTkLabel(_hsv_row, text="Val:", font=("Segoe UI", 12), anchor="w")
+    _lbl_hsv_v.pack(side="left")
+    try:
+        _hsv_v_init = float(_train_form_state.get("hsv_v", 0.4))
+    except (ValueError, TypeError):
+        _hsv_v_init = 0.4
+    _hsv_v_frame, _train_hsv_v_var = _make_spinbox(_hsv_row, _hsv_v_init, step=0.05, is_float=True, width=70)
+    _train_hsv_v_var.trace_add("write", lambda *_: _train_form_state.update({"hsv_v": _train_hsv_v_var.get()}))
+    _hsv_v_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_hsv_v,   "Random brightness (value) jitter fraction (0.0–1.0).")
+    Tooltip(_hsv_v_frame, "Random brightness (value) jitter fraction (0.0–1.0).")
+
+    # Geometric augmentation row 1: degrees + translate
+    _lbl_p(_aug_body, "Geometric Augmentation")
+    _geo_row1 = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _geo_row1.pack(fill="x", **PAD)
+    _lbl_deg = ctk.CTkLabel(_geo_row1, text="Degrees:", font=("Segoe UI", 12), anchor="w")
+    _lbl_deg.pack(side="left")
+    try:
+        _deg_init = float(_train_form_state.get("degrees", 0.0))
+    except (ValueError, TypeError):
+        _deg_init = 0.0
+    _deg_frame, _train_degrees_var = _make_spinbox(_geo_row1, _deg_init, step=1.0, is_float=True, width=70)
+    _train_degrees_var.trace_add("write", lambda *_: _train_form_state.update({"degrees": _train_degrees_var.get()}))
+    _deg_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_deg,   "Random rotation range ± degrees (0.0 = disabled).")
+    Tooltip(_deg_frame, "Random rotation range ± degrees (0.0 = disabled).")
+    _lbl_tran = ctk.CTkLabel(_geo_row1, text="Translate:", font=("Segoe UI", 12), anchor="w")
+    _lbl_tran.pack(side="left")
+    try:
+        _tran_init = float(_train_form_state.get("translate", 0.1))
+    except (ValueError, TypeError):
+        _tran_init = 0.1
+    _tran_frame, _train_translate_var = _make_spinbox(_geo_row1, _tran_init, step=0.05, is_float=True, width=70)
+    _train_translate_var.trace_add("write", lambda *_: _train_form_state.update({"translate": _train_translate_var.get()}))
+    _tran_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_tran,   "Image translation fraction (0.0–0.9).")
+    Tooltip(_tran_frame, "Image translation fraction (0.0–0.9).")
+
+    # Geometric augmentation row 2: scale + shear
+    _geo_row2 = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _geo_row2.pack(fill="x", **PAD)
+    _lbl_sc = ctk.CTkLabel(_geo_row2, text="Scale:", font=("Segoe UI", 12), anchor="w")
+    _lbl_sc.pack(side="left")
+    try:
+        _sc_init = float(_train_form_state.get("scale", 0.5))
+    except (ValueError, TypeError):
+        _sc_init = 0.5
+    _sc_frame, _train_scale_var = _make_spinbox(_geo_row2, _sc_init, step=0.05, is_float=True, width=70)
+    _train_scale_var.trace_add("write", lambda *_: _train_form_state.update({"scale": _train_scale_var.get()}))
+    _sc_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_sc,   "Image scale gain ± fraction (e.g. 0.5 → 50–150% of original size).")
+    Tooltip(_sc_frame, "Image scale gain ± fraction (e.g. 0.5 → 50–150% of original size).")
+    _lbl_sh = ctk.CTkLabel(_geo_row2, text="Shear:", font=("Segoe UI", 12), anchor="w")
+    _lbl_sh.pack(side="left")
+    try:
+        _sh_init = float(_train_form_state.get("shear", 0.0))
+    except (ValueError, TypeError):
+        _sh_init = 0.0
+    _sh_frame, _train_shear_var = _make_spinbox(_geo_row2, _sh_init, step=0.5, is_float=True, width=70)
+    _train_shear_var.trace_add("write", lambda *_: _train_form_state.update({"shear": _train_shear_var.get()}))
+    _sh_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_sh,   "Image shear range ± degrees (0.0 = disabled).")
+    Tooltip(_sh_frame, "Image shear range ± degrees (0.0 = disabled).")
+
+    # Geometric augmentation row 3: perspective
+    _geo_row3 = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _geo_row3.pack(fill="x", **PAD)
+    _lbl_persp = ctk.CTkLabel(_geo_row3, text="Perspective:", font=("Segoe UI", 12), anchor="w")
+    _lbl_persp.pack(side="left")
+    try:
+        _persp_init = float(_train_form_state.get("perspective", 0.0))
+    except (ValueError, TypeError):
+        _persp_init = 0.0
+    _persp_frame, _train_perspective_var = _make_spinbox(_geo_row3, _persp_init, step=0.0001, is_float=True, width=80)
+    _train_perspective_var.trace_add("write", lambda *_: _train_form_state.update({"perspective": _train_perspective_var.get()}))
+    _persp_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_persp,   "Random perspective transform fraction (0.0–0.001, 0.0 = disabled).")
+    Tooltip(_persp_frame, "Random perspective transform fraction (0.0–0.001, 0.0 = disabled).")
+
+    # Flip augmentation
+    _lbl_p(_aug_body, "Flip Augmentation")
+    _flip_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _flip_row.pack(fill="x", **PAD)
+    _lbl_fud = ctk.CTkLabel(_flip_row, text="Flip Up-Down:", font=("Segoe UI", 12), anchor="w")
+    _lbl_fud.pack(side="left")
+    try:
+        _fud_init = float(_train_form_state.get("flipud", 0.0))
+    except (ValueError, TypeError):
+        _fud_init = 0.0
+    _fud_frame, _train_flipud_var = _make_spinbox(_flip_row, _fud_init, step=0.05, is_float=True, width=70)
+    _train_flipud_var.trace_add("write", lambda *_: _train_form_state.update({"flipud": _train_flipud_var.get()}))
+    _fud_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_fud,   "Probability of vertical (up-down) flip (0.0–1.0).")
+    Tooltip(_fud_frame, "Probability of vertical (up-down) flip (0.0–1.0).")
+    _lbl_flr = ctk.CTkLabel(_flip_row, text="Flip Left-Right:", font=("Segoe UI", 12), anchor="w")
+    _lbl_flr.pack(side="left")
+    try:
+        _flr_init = float(_train_form_state.get("fliplr", 0.5))
+    except (ValueError, TypeError):
+        _flr_init = 0.5
+    _flr_frame, _train_fliplr_var = _make_spinbox(_flip_row, _flr_init, step=0.05, is_float=True, width=70)
+    _train_fliplr_var.trace_add("write", lambda *_: _train_form_state.update({"fliplr": _train_fliplr_var.get()}))
+    _flr_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_flr,   "Probability of horizontal (left-right) flip (0.0–1.0).")
+    Tooltip(_flr_frame, "Probability of horizontal (left-right) flip (0.0–1.0).")
+
+    # Mosaic + BGR row
+    _lbl_p(_aug_body, "Mosaic & Channel Augmentation")
+    _mos_bgr_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _mos_bgr_row.pack(fill="x", **PAD)
+    _lbl_mos = ctk.CTkLabel(_mos_bgr_row, text="Mosaic:", font=("Segoe UI", 12), anchor="w")
+    _lbl_mos.pack(side="left")
+    try:
+        _mos_init = float(_train_form_state.get("mosaic", 1.0))
+    except (ValueError, TypeError):
+        _mos_init = 1.0
+    _mos_frame, _train_mosaic_var = _make_spinbox(_mos_bgr_row, _mos_init, step=0.05, is_float=True, width=70)
+    _train_mosaic_var.trace_add("write", lambda *_: _train_form_state.update({"mosaic": _train_mosaic_var.get()}))
+    _mos_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_mos,   "Probability of mosaic augmentation (0.0–1.0). 1.0 = always use mosaic.")
+    Tooltip(_mos_frame, "Probability of mosaic augmentation (0.0–1.0). 1.0 = always use mosaic.")
+    _lbl_bgr = ctk.CTkLabel(_mos_bgr_row, text="BGR Swap:", font=("Segoe UI", 12), anchor="w")
+    _lbl_bgr.pack(side="left")
+    try:
+        _bgr_init = float(_train_form_state.get("bgr", 0.0))
+    except (ValueError, TypeError):
+        _bgr_init = 0.0
+    _bgr_frame, _train_bgr_var = _make_spinbox(_mos_bgr_row, _bgr_init, step=0.05, is_float=True, width=70)
+    _train_bgr_var.trace_add("write", lambda *_: _train_form_state.update({"bgr": _train_bgr_var.get()}))
+    _bgr_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_bgr,   "Probability of swapping RGB to BGR channel order (0.0–1.0).")
+    Tooltip(_bgr_frame, "Probability of swapping RGB to BGR channel order (0.0–1.0).")
+
+    # Mixup + Copy-Paste row
+    _lbl_p(_aug_body, "Mixup & Copy-Paste Augmentation")
+    _mix_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _mix_row.pack(fill="x", **PAD)
+    _lbl_mix = ctk.CTkLabel(_mix_row, text="Mixup:", font=("Segoe UI", 12), anchor="w")
+    _lbl_mix.pack(side="left")
+    try:
+        _mix_init = float(_train_form_state.get("mixup", 0.0))
+    except (ValueError, TypeError):
+        _mix_init = 0.0
+    _mix_frame, _train_mixup_var = _make_spinbox(_mix_row, _mix_init, step=0.05, is_float=True, width=70)
+    _train_mixup_var.trace_add("write", lambda *_: _train_form_state.update({"mixup": _train_mixup_var.get()}))
+    _mix_frame.pack(side="left", padx=(4, 12))
+    Tooltip(_lbl_mix,   "Mixup augmentation probability — blends two images and their labels (0.0–1.0).")
+    Tooltip(_mix_frame, "Mixup augmentation probability — blends two images and their labels (0.0–1.0).")
+    _lbl_cp = ctk.CTkLabel(_mix_row, text="Copy-Paste:", font=("Segoe UI", 12), anchor="w")
+    _lbl_cp.pack(side="left")
+    try:
+        _cp_init = float(_train_form_state.get("copy_paste", 0.0))
+    except (ValueError, TypeError):
+        _cp_init = 0.0
+    _cp_frame, _train_copy_paste_var = _make_spinbox(_mix_row, _cp_init, step=0.05, is_float=True, width=70)
+    _train_copy_paste_var.trace_add("write", lambda *_: _train_form_state.update({"copy_paste": _train_copy_paste_var.get()}))
+    _cp_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_cp,   "Copy-paste augmentation probability (segmentation; 0.0–1.0).")
+    Tooltip(_cp_frame, "Copy-paste augmentation probability (segmentation; 0.0–1.0).")
+
+    # Copy-Paste Mode dropdown
+    _lbl_p(_aug_body, "Copy-Paste Mode")
+    _CP_MODE_OPTIONS = ["flip", "mixup"]
+    _train_copy_paste_mode_var = ctk.StringVar(value=str(_train_form_state.get("copy_paste_mode", "flip")))
+    _train_copy_paste_mode_var.trace_add("write", lambda *_: _train_form_state.update({"copy_paste_mode": _train_copy_paste_mode_var.get()}))
+    _cp_mode_menu = ctk.CTkOptionMenu(
+        _aug_body, values=_CP_MODE_OPTIONS, variable=_train_copy_paste_mode_var,
+        font=FBTN, height=32,
+    )
+    _cp_mode_menu.pack(fill="x", **PAD)
+    Tooltip(_cp_mode_menu,
+        "How copy-pasted objects are blended into the target image.\n"
+        "  flip  – copy object with horizontal flip (default)\n"
+        "  mixup – blend using mixup-style alpha weighting")
+
+    # Auto Augment Policy dropdown
+    _lbl_p(_aug_body, "Auto Augment Policy  (Classification)")
+    _AA_OPTIONS = ["randaugment", "autoaugment", "trivialaugment"]
+    _train_auto_augment_var = ctk.StringVar(value=str(_train_form_state.get("auto_augment", "randaugment")))
+    _train_auto_augment_var.trace_add("write", lambda *_: _train_form_state.update({"auto_augment": _train_auto_augment_var.get()}))
+    _aa_menu = ctk.CTkOptionMenu(
+        _aug_body, values=_AA_OPTIONS, variable=_train_auto_augment_var,
+        font=FBTN, height=32,
+    )
+    _aa_menu.pack(fill="x", **PAD)
+    Tooltip(_aa_menu,
+        "Automatic augmentation policy applied when training classification models.\n"
+        "  randaugment    – randomly applies a set of augmentations (default)\n"
+        "  autoaugment    – learned augmentation policy from AutoAugment paper\n"
+        "  trivialaugment – randomly applies one augmentation with random magnitude")
+
+    # Random Erasing probability
+    _lbl_p(_aug_body, "Random Erasing")
+    _er_row = ctk.CTkFrame(_aug_body, fg_color="transparent")
+    _er_row.pack(fill="x", **PAD)
+    _lbl_er = ctk.CTkLabel(_er_row, text="Erasing prob:", font=("Segoe UI", 12), anchor="w")
+    _lbl_er.pack(side="left")
+    try:
+        _er_init = float(_train_form_state.get("erasing", 0.4))
+    except (ValueError, TypeError):
+        _er_init = 0.4
+    _er_frame, _train_erasing_var = _make_spinbox(_er_row, _er_init, step=0.05, is_float=True, width=70)
+    _train_erasing_var.trace_add("write", lambda *_: _train_form_state.update({"erasing": _train_erasing_var.get()}))
+    _er_frame.pack(side="left", padx=(4, 0))
+    Tooltip(_lbl_er,   "Probability of randomly erasing a rectangle in the image during training (0.0–1.0).")
+    Tooltip(_er_frame, "Probability of randomly erasing a rectangle in the image during training (0.0–1.0).")
+
     _sep()
     _lbl("Class Names  (one per line)")
     class_names_text = ctk.CTkTextbox(config_panel, font=FENT, height=110)
@@ -2590,6 +2906,74 @@ def show_ai_train_window() -> None:
             ep['dropout'] = float(_train_dropout_var.get()) if _train_dropout_var else 0.0
         except Exception:
             ep['dropout'] = 0.0
+        # Augmentation params
+        ep['augment'] = bool(_train_augment_var.get()) if _train_augment_var else False
+        try:
+            ep['hsv_h'] = float(_train_hsv_h_var.get()) if _train_hsv_h_var else 0.015
+        except Exception:
+            ep['hsv_h'] = 0.015
+        try:
+            ep['hsv_s'] = float(_train_hsv_s_var.get()) if _train_hsv_s_var else 0.7
+        except Exception:
+            ep['hsv_s'] = 0.7
+        try:
+            ep['hsv_v'] = float(_train_hsv_v_var.get()) if _train_hsv_v_var else 0.4
+        except Exception:
+            ep['hsv_v'] = 0.4
+        try:
+            ep['degrees'] = float(_train_degrees_var.get()) if _train_degrees_var else 0.0
+        except Exception:
+            ep['degrees'] = 0.0
+        try:
+            ep['translate'] = float(_train_translate_var.get()) if _train_translate_var else 0.1
+        except Exception:
+            ep['translate'] = 0.1
+        try:
+            ep['scale'] = float(_train_scale_var.get()) if _train_scale_var else 0.5
+        except Exception:
+            ep['scale'] = 0.5
+        try:
+            ep['shear'] = float(_train_shear_var.get()) if _train_shear_var else 0.0
+        except Exception:
+            ep['shear'] = 0.0
+        try:
+            ep['perspective'] = float(_train_perspective_var.get()) if _train_perspective_var else 0.0
+        except Exception:
+            ep['perspective'] = 0.0
+        try:
+            ep['flipud'] = float(_train_flipud_var.get()) if _train_flipud_var else 0.0
+        except Exception:
+            ep['flipud'] = 0.0
+        try:
+            ep['fliplr'] = float(_train_fliplr_var.get()) if _train_fliplr_var else 0.5
+        except Exception:
+            ep['fliplr'] = 0.5
+        try:
+            ep['bgr'] = float(_train_bgr_var.get()) if _train_bgr_var else 0.0
+        except Exception:
+            ep['bgr'] = 0.0
+        try:
+            ep['mosaic'] = float(_train_mosaic_var.get()) if _train_mosaic_var else 1.0
+        except Exception:
+            ep['mosaic'] = 1.0
+        try:
+            ep['mixup'] = float(_train_mixup_var.get()) if _train_mixup_var else 0.0
+        except Exception:
+            ep['mixup'] = 0.0
+        try:
+            ep['copy_paste'] = float(_train_copy_paste_var.get()) if _train_copy_paste_var else 0.0
+        except Exception:
+            ep['copy_paste'] = 0.0
+        ep['copy_paste_mode'] = str(_train_copy_paste_mode_var.get()) if _train_copy_paste_mode_var else 'flip'
+        ep['auto_augment'] = str(_train_auto_augment_var.get()) if _train_auto_augment_var else 'randaugment'
+        try:
+            ep['erasing'] = float(_train_erasing_var.get()) if _train_erasing_var else 0.4
+        except Exception:
+            ep['erasing'] = 0.4
+        try:
+            ep['crop_fraction'] = float(_train_crop_fraction_var.get()) if _train_crop_fraction_var else 1.0
+        except Exception:
+            ep['crop_fraction'] = 1.0
         return ep
 
     def _get_current_job_config():
@@ -2896,6 +3280,45 @@ def show_ai_train_window() -> None:
             _train_mask_ratio_var.set(str(cfg.get("mask_ratio", 4)))
         if _train_dropout_var is not None:
             _train_dropout_var.set(f"{cfg.get('dropout', 0.0):.4g}")
+        # Augmentation params
+        if _train_augment_var is not None:
+            _train_augment_var.set(bool(cfg.get("augment", False)))
+        if _train_hsv_h_var is not None:
+            _train_hsv_h_var.set(f"{cfg.get('hsv_h', 0.015):.4g}")
+        if _train_hsv_s_var is not None:
+            _train_hsv_s_var.set(f"{cfg.get('hsv_s', 0.7):.4g}")
+        if _train_hsv_v_var is not None:
+            _train_hsv_v_var.set(f"{cfg.get('hsv_v', 0.4):.4g}")
+        if _train_degrees_var is not None:
+            _train_degrees_var.set(f"{cfg.get('degrees', 0.0):.4g}")
+        if _train_translate_var is not None:
+            _train_translate_var.set(f"{cfg.get('translate', 0.1):.4g}")
+        if _train_scale_var is not None:
+            _train_scale_var.set(f"{cfg.get('scale', 0.5):.4g}")
+        if _train_shear_var is not None:
+            _train_shear_var.set(f"{cfg.get('shear', 0.0):.4g}")
+        if _train_perspective_var is not None:
+            _train_perspective_var.set(f"{cfg.get('perspective', 0.0):.6g}")
+        if _train_flipud_var is not None:
+            _train_flipud_var.set(f"{cfg.get('flipud', 0.0):.4g}")
+        if _train_fliplr_var is not None:
+            _train_fliplr_var.set(f"{cfg.get('fliplr', 0.5):.4g}")
+        if _train_bgr_var is not None:
+            _train_bgr_var.set(f"{cfg.get('bgr', 0.0):.4g}")
+        if _train_mosaic_var is not None:
+            _train_mosaic_var.set(f"{cfg.get('mosaic', 1.0):.4g}")
+        if _train_mixup_var is not None:
+            _train_mixup_var.set(f"{cfg.get('mixup', 0.0):.4g}")
+        if _train_copy_paste_var is not None:
+            _train_copy_paste_var.set(f"{cfg.get('copy_paste', 0.0):.4g}")
+        if _train_copy_paste_mode_var is not None:
+            _train_copy_paste_mode_var.set(str(cfg.get("copy_paste_mode", "flip")))
+        if _train_auto_augment_var is not None:
+            _train_auto_augment_var.set(str(cfg.get("auto_augment", "randaugment")))
+        if _train_erasing_var is not None:
+            _train_erasing_var.set(f"{cfg.get('erasing', 0.4):.4g}")
+        if _train_crop_fraction_var is not None:
+            _train_crop_fraction_var.set(f"{cfg.get('crop_fraction', 1.0):.4g}")
 
         # ── Path fields ───────────────────────────────────────────────────
         # Restore train_data_path
@@ -5569,7 +5992,13 @@ def start_training(
         errors.append("• Epochs must be a positive integer (e.g. 300).")
     if not batch_val or not batch_val.isdigit() or int(batch_val) < 1:
         errors.append("• Batch Size must be a positive integer (e.g. 16).")
-    if not class_names:
+    # Classification models infer class names from folder structure – skip this check
+    _is_cls_task = (
+        (task_type_var is not None and task_type_var.get() == "Classification")
+        or "-cls" in selected_model_size.lower()
+        or (custom_model_path and "-cls" in Path(custom_model_path).stem.lower())
+    )
+    if not class_names and not _is_cls_task:
         errors.append("• Class Names are empty.")
 
     # When using a Roboflow YAML we don't need a raw data folder
@@ -5725,6 +6154,74 @@ def _collect_extra_params_global(workers_val="8"):
         ep['dropout'] = float(_train_dropout_var.get()) if _train_dropout_var else 0.0
     except Exception:
         ep['dropout'] = 0.0
+    # Augmentation params
+    ep['augment'] = bool(_train_augment_var.get()) if _train_augment_var else False
+    try:
+        ep['hsv_h'] = float(_train_hsv_h_var.get()) if _train_hsv_h_var else 0.015
+    except Exception:
+        ep['hsv_h'] = 0.015
+    try:
+        ep['hsv_s'] = float(_train_hsv_s_var.get()) if _train_hsv_s_var else 0.7
+    except Exception:
+        ep['hsv_s'] = 0.7
+    try:
+        ep['hsv_v'] = float(_train_hsv_v_var.get()) if _train_hsv_v_var else 0.4
+    except Exception:
+        ep['hsv_v'] = 0.4
+    try:
+        ep['degrees'] = float(_train_degrees_var.get()) if _train_degrees_var else 0.0
+    except Exception:
+        ep['degrees'] = 0.0
+    try:
+        ep['translate'] = float(_train_translate_var.get()) if _train_translate_var else 0.1
+    except Exception:
+        ep['translate'] = 0.1
+    try:
+        ep['scale'] = float(_train_scale_var.get()) if _train_scale_var else 0.5
+    except Exception:
+        ep['scale'] = 0.5
+    try:
+        ep['shear'] = float(_train_shear_var.get()) if _train_shear_var else 0.0
+    except Exception:
+        ep['shear'] = 0.0
+    try:
+        ep['perspective'] = float(_train_perspective_var.get()) if _train_perspective_var else 0.0
+    except Exception:
+        ep['perspective'] = 0.0
+    try:
+        ep['flipud'] = float(_train_flipud_var.get()) if _train_flipud_var else 0.0
+    except Exception:
+        ep['flipud'] = 0.0
+    try:
+        ep['fliplr'] = float(_train_fliplr_var.get()) if _train_fliplr_var else 0.5
+    except Exception:
+        ep['fliplr'] = 0.5
+    try:
+        ep['bgr'] = float(_train_bgr_var.get()) if _train_bgr_var else 0.0
+    except Exception:
+        ep['bgr'] = 0.0
+    try:
+        ep['mosaic'] = float(_train_mosaic_var.get()) if _train_mosaic_var else 1.0
+    except Exception:
+        ep['mosaic'] = 1.0
+    try:
+        ep['mixup'] = float(_train_mixup_var.get()) if _train_mixup_var else 0.0
+    except Exception:
+        ep['mixup'] = 0.0
+    try:
+        ep['copy_paste'] = float(_train_copy_paste_var.get()) if _train_copy_paste_var else 0.0
+    except Exception:
+        ep['copy_paste'] = 0.0
+    ep['copy_paste_mode'] = str(_train_copy_paste_mode_var.get()) if _train_copy_paste_mode_var else 'flip'
+    ep['auto_augment'] = str(_train_auto_augment_var.get()) if _train_auto_augment_var else 'randaugment'
+    try:
+        ep['erasing'] = float(_train_erasing_var.get()) if _train_erasing_var else 0.4
+    except Exception:
+        ep['erasing'] = 0.4
+    try:
+        ep['crop_fraction'] = float(_train_crop_fraction_var.get()) if _train_crop_fraction_var else 1.0
+    except Exception:
+        ep['crop_fraction'] = 1.0
     return ep
 
 
@@ -5791,13 +6288,22 @@ def _proceed_with_training(extra_params: dict) -> None:
     """Build YAML and kick off the training subprocess."""
     workers_int = extra_params.get('workers', 8)
 
-    if roboflow_yaml_path:
-        yaml_path = roboflow_yaml_path
-    else:
-        yaml_path = create_yaml(project_name, train_data_path, class_names, model_save_path)
-
     selected_display    = selected_model_var.get() if selected_model_var else ""
     selected_model_size = MODEL_MAP.get(selected_display, "")
+
+    # Classification training expects the dataset folder path directly, not a YAML
+    _is_cls = (
+        (task_type_var is not None and task_type_var.get() == "Classification")
+        or "-cls" in selected_model_size.lower()
+        or (custom_model_path and "-cls" in Path(custom_model_path).stem.lower())
+    )
+
+    if roboflow_yaml_path:
+        yaml_path = roboflow_yaml_path
+    elif _is_cls:
+        yaml_path = train_data_path  # pass dataset folder directly for classification
+    else:
+        yaml_path = create_yaml(project_name, train_data_path, class_names, model_save_path)
 
     _run_training_subprocess(yaml_path, selected_model_size, workers_int, extra_params)
 
